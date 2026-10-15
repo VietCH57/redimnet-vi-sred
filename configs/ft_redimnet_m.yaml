@@ -1,0 +1,52 @@
+# Fine-tune ReDimNet-M (4.81M) on Vi-SRED26, Kaggle 2x T4.
+# python train.py --config configs/ft_redimnet_m.yaml
+train_list: /kaggle/input/datasets/hongvitchugo/vi-sred26-train/train_split.txt
+train_path: /kaggle/input/datasets/hongvitchugo/vi-sred26-train/Vi-SRED26-Train/data
+eval_list:  /kaggle/input/datasets/hongvitchugo/vi-sred26-train/val_trials.txt
+eval_path:  /kaggle/input/datasets/hongvitchugo/vi-sred26-train/Vi-SRED26-Train/data
+musan_path: /kaggle/input/datasets/nhattruongdev/musan-noise
+rir_path:   /kaggle/input/datasets/nhattruongdev/rirs-noises
+save_path:  /kaggle/working/exps/redimnet_m_ft
+
+pretrained: redimnet:M-vb2+vox2+cnc-ft_mix
+max_params: 7000000
+
+# data / augmentation
+crop_sec: [2.0, 3.0]
+batch_size: 64
+n_cpu: 8
+speed_perturb: [0.9, 1.1]
+narrowband_prob: 0.2
+specaug: true
+
+# head warm-up, then the whole network
+head_init: centroid
+freeze_epochs: 1
+warmup_epochs: 1
+max_epoch: 20
+optimizer: adamw
+lr_head: 0.001
+lr_backbone: 0.0001
+layer_decay: 1.0
+scheduler: cosine
+lr_min_ratio: 0.01
+weight_decay: 0.00001
+l2sp: 0.0001
+grad_clip: 5.0
+amp: true
+m: 0.2
+s: 30
+
+# evaluation on val every epoch (fast batched approximation, exact scoring with infer.py)
+test_step: 1
+eval_init: true
+eval_mode: full
+eval_len_tol: 0.05
+cohort_size: 1000
+select_score: cos
+
+data_parallel: true
+keep_last: 3
+log_interval: 20
+seed: 42
+max_hours: 11.0

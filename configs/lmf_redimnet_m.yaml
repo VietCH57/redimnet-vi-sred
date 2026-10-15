@@ -1,0 +1,45 @@
+# Large-margin fine-tuning after ft_redimnet_m.yaml:
+# python train.py --config configs/lmf_redimnet_m.yaml --initial_model /kaggle/working/exps/redimnet_m_ft/model/last.ckpt
+# (last.ckpt keeps the trained AAM head; with best.model the head is re-initialised from centroids)
+train_list: /kaggle/input/datasets/hongvitchugo/vi-sred26-train/train_split.txt
+train_path: /kaggle/input/datasets/hongvitchugo/vi-sred26-train/Vi-SRED26-Train/data
+eval_list:  /kaggle/input/datasets/hongvitchugo/vi-sred26-train/val_trials.txt
+eval_path:  /kaggle/input/datasets/hongvitchugo/vi-sred26-train/Vi-SRED26-Train/data
+musan_path: /kaggle/input/datasets/nhattruongdev/musan-noise
+rir_path:   /kaggle/input/datasets/nhattruongdev/rirs-noises
+save_path:  /kaggle/working/exps/redimnet_m_lmf
+
+pretrained: redimnet:M-vb2+vox2+cnc-ft_mix   # only used if --initial_model is empty
+max_params: 7000000
+
+crop_sec: [4.0]
+batch_size: 32
+accum_steps: 2
+n_cpu: 8
+speed_perturb: [0.9, 1.1]   # keep the same classes as the first stage so the head can be reused
+aug_probs: [3, 1, 1, 1, 1, 1]   # more clean speech, fewer augmentations (LMF recipe)
+narrowband_prob: 0.1
+
+head_init: centroid
+freeze_epochs: 0
+warmup_epochs: 0.5
+max_epoch: 5
+lr_head: 0.0001
+lr_backbone: 0.00002
+scheduler: cosine
+lr_min_ratio: 0.05
+l2sp: 0.0001
+m: 0.4
+s: 30
+amp: true
+
+test_step: 1
+eval_init: true
+eval_len_tol: 0.05
+cohort_size: 1000
+
+data_parallel: true
+keep_last: 2
+log_interval: 20
+seed: 42
+max_hours: 11.0

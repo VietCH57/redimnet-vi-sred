@@ -1,0 +1,9 @@
+torch>=2.0
+torchaudio>=2.0
+numpy
+scipy
+scikit-learn
+soundfile
+tqdm
+pyyaml
+pandas   # only for --eval_meta
