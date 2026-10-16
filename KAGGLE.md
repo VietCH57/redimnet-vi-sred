@@ -35,17 +35,18 @@ Lệnh in ra batch lớn nhất mỗi GPU chịu được, cùng một cặp `--
 ## 3. Fine-tune
 
 ```bash
-!python train.py --config configs/ft_redimnet_m.yaml
+!torchrun --standalone --nproc_per_node 2 train.py --config configs/ft_redimnet_m.yaml
 ```
 
-- **Kiểm tra log trước khi để chạy lâu.** Đầu log in thư mục MUSAN/RIR tìm được, xác suất từng loại augment, số lớp (= số speaker × 3 vì speed perturb) và EER ở epoch 0 (phải xấp xỉ zero-shot, khoảng 2.3% trên val).
+- **Kiểm tra log trước khi để chạy lâu.** Đầu log in thư mục MUSAN/RIR tìm được, xác suất từng loại augment, số lớp (= số speaker × 3 vì speed perturb) và EER ở epoch 0 (phải xấp xỉ zero-shot: `EER` khoảng 3,0%, `EER_center` khoảng 2,4% trên val).
 - **Dòng tiến độ** in thời gian mỗi epoch và bộ nhớ GPU đỉnh. Nếu bị OOM, giảm `--batch_size` và tăng `--accum_steps`.
+- **Dùng `torchrun` để chạy 2 GPU, không dùng `--data_parallel`:** DataParallel chậm hơn cả 1 GPU và làm RAM tăng dần tới khi bị kill. Xem README.
 - **Resume khi session bị ngắt:** chạy lại đúng lệnh cũ. Nếu `last.ckpt` nằm trong output của notebook trước (đã add làm dataset), dùng `--resume /kaggle/input/.../model/last.ckpt --save_path /kaggle/working/exps/<tên>`.
 
 ## 4. LMF (tuỳ chọn)
 
 ```bash
-!python train.py --config configs/lmf_redimnet_m.yaml --initial_model /kaggle/working/exps/redimnet_m_ft/model/last.ckpt
+!torchrun --standalone --nproc_per_node 2 train.py --config configs/lmf_redimnet_m.yaml --initial_model /kaggle/working/exps/redimnet_m_ft/model/last.ckpt
 ```
 
 ## 5. File nộp

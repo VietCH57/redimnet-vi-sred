@@ -43,8 +43,8 @@ def build_parser():
     g.add_argument('--train_path', type=str, default='', help='Root folder of the training wavs')
     g.add_argument('--crop_sec', type=_floats, default=[2.0, 3.0], help='Training crop lengths (s); one is drawn per batch')
     g.add_argument('--crop_probs', type=_floats, default=[], help='Probabilities of --crop_sec (empty = uniform)')
-    g.add_argument('--batch_size', type=int, default=64, help='Batch size (split over GPUs with --data_parallel)')
-    g.add_argument('--n_cpu', type=int, default=8, help='DataLoader workers')
+    g.add_argument('--batch_size', type=int, default=64, help='Global batch size (split over the GPUs with torchrun / --data_parallel)')
+    g.add_argument('--n_cpu', type=int, default=8, help='DataLoader workers in total (with torchrun they are shared by the GPU processes)')
     g.add_argument('--seed', type=int, default=42, help='Random seed (-1 = do not seed)')
 
     g = p.add_argument_group('Augmentation (waveform)')
@@ -127,7 +127,7 @@ def build_parser():
     g.add_argument('--save_best', type=_str2bool, default=True, help='Save model/best.model (lowest EER)')
     g.add_argument('--log_interval', type=int, default=20, help='Print progress every N batches')
     g.add_argument('--device', type=str, default='cuda', help='cuda / cuda:0 / cpu')
-    g.add_argument('--data_parallel', type=_str2bool, default=False, help='Split every training batch over all visible GPUs (nn.DataParallel); evaluation uses one GPU')
+    g.add_argument('--data_parallel', type=_str2bool, default=False, help='Single-process nn.DataParallel over all GPUs. Slow and leaks host RAM with ReDimNet: use torchrun instead')
 
     g = p.add_argument_group('Command')
     g.add_argument('--eval', dest='eval', action='store_true', help='Only evaluate --initial_model (or --pretrained) on --eval_list and exit')

@@ -15,7 +15,7 @@ max_params: 7000000
 crop_sec: [4.0]
 batch_size: 32
 accum_steps: 2
-n_cpu: 8
+n_cpu: 4             # total DataLoader workers (shared by the DDP processes)
 speed_perturb: [0.9, 1.1]   # keep the same classes as the first stage so the head can be reused
 aug_probs: [3, 1, 1, 1, 1, 1]   # more clean speech, fewer augmentations (LMF recipe)
 narrowband_prob: 0.1
@@ -38,7 +38,7 @@ eval_init: true
 eval_len_tol: 0.05
 cohort_size: 1000
 
-data_parallel: true
+data_parallel: false   # use torchrun (DDP) for 2 GPUs; DataParallel is slow and leaks RAM with ReDimNet
 keep_last: 2
 log_interval: 20
 seed: 42

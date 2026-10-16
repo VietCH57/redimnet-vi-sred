@@ -74,9 +74,13 @@ def load_wav(path):
 
 class CropBatchSampler(torch.utils.data.Sampler):
     '''Shuffled batches of (index, crop_samples); the crop length is drawn once per batch so that a
-    batch can be stacked. Deterministic for a given (seed, epoch): call set_epoch() every epoch.'''
+    batch can be stacked. Deterministic for a given (seed, epoch): call set_epoch() every epoch.
+    With DDP (world > 1) every rank draws the same global batches and keeps its own slice
+    (batch_size = global batch, each rank gets batch_size // world items of the same crop length).'''
 
-    def __init__(self, n_items, batch_size, crop_sec=(2.0,), crop_probs=None, seed=0, drop_last=True):
+    def __init__(self, n_items, batch_size, crop_sec=(2.0,), crop_probs=None, seed=0, drop_last=True, rank=0, world=1):
+        assert batch_size % world == 0, '--batch_size (%d) must be divisible by the number of GPUs (%d)' % (batch_size, world)
+        self.rank, self.world = rank, world
         self.n, self.bs, self.seed, self.drop_last = n_items, batch_size, seed, drop_last
         self.crops = [int(round(c * SR)) for c in crop_sec]
         p = list(crop_probs) if crop_probs else [1.0] * len(self.crops)
@@ -93,7 +97,7 @@ class CropBatchSampler(torch.utils.data.Sampler):
         for b in range(len(self)):
             chunk = idx[b * self.bs:(b + 1) * self.bs]
             L = rng.choices(self.crops, weights=self.p)[0]
-            yield [(i, L) for i in chunk]
+            yield [(i, L) for i in chunk[self.rank::self.world]]
 
     def __len__(self):
         return self.n // self.bs if self.drop_last else math.ceil(self.n / self.bs)

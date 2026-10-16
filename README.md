@@ -43,7 +43,26 @@ Giống repo ECAPA:
 python train.py --config configs/ft_redimnet_m.yaml                 # fine-tune
 python train.py --config configs/ft_redimnet_m.yaml --batch_size 48  # ghi đè tham số bất kỳ
 python train.py -h                                                  # mọi tham số và giá trị mặc định
+
+# nhiều GPU: mỗi GPU một tiến trình (DistributedDataParallel)
+torchrun --standalone --nproc_per_node 2 train.py --config configs/ft_redimnet_m.yaml
 ```
+
+**Nhiều GPU: dùng `torchrun`, không dùng `--data_parallel`.** Đo trên Kaggle 2× T4 với ReDimNet-M (fp16, forward + backward):
+
+| | mẫu/s |
+|---|---|
+| 1 GPU | 26,6 |
+| 2 GPU với `nn.DataParallel` | 18,8 (chậm hơn 1 GPU, RAM tăng 0,5–1,2 GB sau mỗi 15 bước) |
+| 2 GPU với `torchrun` (DDP) | khoảng gấp đôi 1 GPU (ước tính, chưa đo) |
+
+Lý do: ReDimNet có rất nhiều lớp nhỏ, nên DataParallel tốn nhiều thời gian chép mô hình sang GPU thứ hai ở mỗi bước, và RAM cứ tăng dần cho tới khi tiến trình bị kill.
+
+Với `torchrun`:
+- `--batch_size` là batch tổng, chia đều cho các GPU.
+- `--n_cpu` là tổng số worker đọc dữ liệu, chia đều cho các tiến trình.
+- Khởi tạo lớp AAM và đánh giá val cũng được chia cho các GPU.
+- Chỉ tiến trình 0 in log và ghi file.
 
 ### Công thức mặc định (`configs/ft_redimnet_m.yaml`)
 
@@ -131,7 +150,8 @@ Một số cờ hay dùng:
 | `models.py` | nạp checkpoint release hoặc file, đoán family, xuất theo định dạng tác giả |
 | `loss.py` | AAM-softmax: kích thước embedding tuỳ chỉnh, đổi được margin, khởi tạo bằng centroid |
 | `dataLoader.py` | crop theo batch, MUSAN/RIR (theo repo ECAPA), speed perturb, kênh băng hẹp |
-| `trainer.py` | vòng train/eval: freeze, lịch LR, L2-SP, AMP, DataParallel, checkpoint |
+| `trainer.py` | vòng train/eval: freeze, lịch LR, L2-SP, AMP, DDP/DataParallel, checkpoint |
+| `dist_utils.py` | hàm phụ cho `torchrun` (khởi tạo, barrier, gom kết quả các GPU) |
 | `train.py`, `config.py` | train qua dòng lệnh hoặc YAML |
 | `infer.py`, `inference.py`, `tools.py` | chấm điểm, đánh giá, trích embedding, EER/minDCF |
 | `probe_memory.py` | tìm batch size vừa GPU |

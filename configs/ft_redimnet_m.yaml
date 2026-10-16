@@ -14,7 +14,7 @@ max_params: 7000000
 # data / augmentation
 crop_sec: [2.0, 3.0]
 batch_size: 64
-n_cpu: 8
+n_cpu: 4             # total DataLoader workers (shared by the DDP processes)
 speed_perturb: [0.9, 1.1]
 narrowband_prob: 0.2
 specaug: true
@@ -45,7 +45,7 @@ eval_len_tol: 0.05
 cohort_size: 1000
 select_score: cos
 
-data_parallel: true
+data_parallel: false   # use torchrun (DDP) for 2 GPUs; DataParallel is slow and leaks RAM with ReDimNet
 keep_last: 3
 log_interval: 20
 seed: 42

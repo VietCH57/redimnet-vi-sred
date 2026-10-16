@@ -3,6 +3,7 @@ Fine-tune ReDimNet / ReDimNet2 with every hyper-parameter on the command line (o
 
     python train.py --config configs/ft_redimnet_m.yaml
     python train.py --config configs/ft_redimnet_m.yaml --batch_size 96 --save_path exps/bs96
+    torchrun --standalone --nproc_per_node 2 train.py --config configs/ft_redimnet_m.yaml   # 2 GPUs (DDP)
     python train.py --eval --pretrained redimnet:M-vb2+vox2+cnc-ft_mix --eval_list ... --eval_path ...
 
 Outputs in --save_path:
@@ -15,8 +16,9 @@ Outputs in --save_path:
     model/anchor.pt          L2-SP reference weights (start of the run)
 '''
 
-import glob, os, random, re, time, warnings
+import glob, os, random, re, sys, time, warnings
 import numpy, torch
+import dist_utils as du
 from config import parse_args, save_config
 from dataLoader import TrainSet, CropBatchSampler, read_list, worker_init
 from trainer import Trainer
@@ -48,10 +50,18 @@ def main():
     warnings.simplefilter('ignore')
     torch.multiprocessing.set_sharing_strategy('file_system')
     args = parse_args()
+    rank, world, local = du.init()
+    if rank > 0:
+        sys.stdout = open(os.devnull, 'w')      # only rank 0 prints (errors still go to stderr)
     if args.device.startswith('cuda') and not torch.cuda.is_available():
         print('CUDA not available -> using CPU'); args.device = 'cpu'
+    if world > 1:
+        args.device = 'cuda:%d' % local if args.device.startswith('cuda') else 'cpu'
+        if args.data_parallel:
+            print('torchrun -> DistributedDataParallel on %d processes; --data_parallel ignored' % world)
+            args.data_parallel = False
     if args.seed >= 0:
-        seed_everything(args.seed)
+        seed_everything(args.seed + rank)       # different augmentation per GPU; weights are synchronised by DDP
     model_dir = os.path.join(args.save_path, 'model')
     p_targets = args.dcf_ptarget
 
@@ -62,22 +72,28 @@ def main():
         s = Trainer(args, n_class=1, init_spec=args.initial_model or None)
         coh = cohort_files(args) if args.train_list else None
         res = s.eval_network(args.eval_list, args.eval_path, coh, p_targets, args.eval_meta)
-        print(fmt(res))
+        if du.is_main():
+            print(fmt(res))
+        du.cleanup()
         return
 
     ## Data
     os.makedirs(model_dir, exist_ok=True)
-    trainset = TrainSet(**vars(args))
+    trainset = TrainSet(verbose=du.is_main(), **{k: v for k, v in vars(args).items() if k != 'verbose'})
     args.n_class = trainset.n_class
-    save_config(args, os.path.join(args.save_path, 'config.json'))
-    with open(os.path.join(args.save_path, 'speakers.txt'), 'w') as f:
-        for k, v in trainset.spk2id.items():
-            f.write('%s %d\n' % (k, v))
-    sampler = CropBatchSampler(len(trainset), args.batch_size, args.crop_sec, args.crop_probs, seed=max(args.seed, 0))
-    loader = torch.utils.data.DataLoader(trainset, batch_sampler=sampler, num_workers=args.n_cpu,
+    if du.is_main():
+        save_config(args, os.path.join(args.save_path, 'config.json'))
+        with open(os.path.join(args.save_path, 'speakers.txt'), 'w') as f:
+            for k, v in trainset.spk2id.items():
+                f.write('%s %d\n' % (k, v))
+    n_workers = max(1, args.n_cpu // world) if args.n_cpu > 0 else 0      # --n_cpu = total over all GPUs
+    sampler = CropBatchSampler(len(trainset), args.batch_size, args.crop_sec, args.crop_probs, seed=max(args.seed, 0),
+                               rank=rank, world=world)
+    loader = torch.utils.data.DataLoader(trainset, batch_sampler=sampler, num_workers=n_workers,
                                          pin_memory=args.device.startswith('cuda'), worker_init_fn=worker_init,
-                                         persistent_workers=args.n_cpu > 0)
-    print('Training: %d utterances, %d classes, %d batches/epoch, crops %s s' % (len(trainset), trainset.n_class, len(loader), args.crop_sec))
+                                         persistent_workers=n_workers > 0)
+    print('Training: %d utterances, %d classes, %d batches/epoch of %d (%d per GPU x %d), crops %s s, %d loader workers per GPU'
+          % (len(trainset), trainset.n_class, len(loader), args.batch_size, args.batch_size // world, world, args.crop_sec, n_workers))
 
     ## Model, possibly resumed
     last_ckpt = os.path.join(model_dir, 'last.ckpt')
@@ -104,8 +120,9 @@ def main():
         if not head_ok and args.head_init == 'centroid':
             s.init_head_centroids(trainset, args.head_init_utts, args.head_init_sec, seed=max(args.seed, 0))
     s.set_anchor(os.path.join(model_dir, 'anchor.pt'), anchor_state)
+    du.barrier()
 
-    score_file = open(os.path.join(args.save_path, 'score.txt'), 'a+')
+    score_file = open(os.path.join(args.save_path, 'score.txt'), 'a+') if du.is_main() else None
     do_eval = bool(args.eval_list)
     cohort = cohort_files(args)
     sel = 'EER' if args.select_score == 'cos' else 'EER_center'
@@ -114,6 +131,8 @@ def main():
         nonlocal best
         t0 = time.time()
         res = s.eval_network(args.eval_list, args.eval_path, cohort, p_targets, args.eval_meta)
+        if not du.is_main():                    # every rank embeds its share; rank 0 scores and saves
+            du.barrier(); return
         EERs.append(res[sel])
         if res[sel] < best:
             best = res[sel]
@@ -123,18 +142,21 @@ def main():
         msg += ', ' + fmt({k: v for k, v in res.items() if k != sel})
         print(time.strftime('%Y-%m-%d %H:%M:%S'), msg, '| eval %.1f min' % ((time.time() - t0) / 60))
         score_file.write(msg + '\n'); score_file.flush()
+        du.barrier()
 
     if do_eval and args.eval_init and epoch == 1:
         evaluate(0, '0 epoch (start: %s)' % (args.initial_model or args.pretrained))
 
     t_start, ep_times = time.time(), []
     while epoch <= args.max_epoch:
+        stop = False
         if args.max_hours > 0 and ep_times:
             need = max(ep_times[-args.test_step:]) * 1.1
-            if time.time() - t_start + need > args.max_hours * 3600:
-                print('Stopping before epoch %d: --max_hours %.2f would be exceeded (%.2f h used). Rerun to resume.'
-                      % (epoch, args.max_hours, (time.time() - t_start) / 3600))
-                break
+            stop = time.time() - t_start + need > args.max_hours * 3600
+        if du.broadcast_object(stop):          # every rank follows rank 0's decision
+            print('Stopping before epoch %d: --max_hours %.2f would be exceeded (%.2f h used). Rerun to resume.'
+                  % (epoch, args.max_hours, (time.time() - t_start) / 3600))
+            break
         t0 = time.time()
         st = s.train_network(epoch, loader)
         train_min = (time.time() - t0) / 60
@@ -143,17 +165,22 @@ def main():
                 epoch, ' (frozen)' if st['frozen'] else '', st['lr_enc'], st['lr_head'], st['margin'], st['loss'], st['acc'], st['l2sp'])
             if do_eval:
                 evaluate(epoch, msg)
-            else:
+            elif du.is_main():
                 print(time.strftime('%Y-%m-%d %H:%M:%S'), msg); score_file.write(msg + '\n'); score_file.flush()
-            s.save_model(os.path.join(model_dir, 'model_%04d.model' % epoch), epoch=epoch)
-            if args.keep_last > 0:
-                for f in sorted(glob.glob(os.path.join(model_dir, 'model_0*.model')), key=epoch_of)[:-args.keep_last]:
-                    os.remove(f)
+            if du.is_main():
+                s.save_model(os.path.join(model_dir, 'model_%04d.model' % epoch), epoch=epoch)
+                if args.keep_last > 0:
+                    for f in sorted(glob.glob(os.path.join(model_dir, 'model_0*.model')), key=epoch_of)[:-args.keep_last]:
+                        os.remove(f)
         print('epoch %d: train %.1f min' % (epoch, train_min))
-        s.save_checkpoint(last_ckpt, epoch, {'EERs': [float(x) for x in EERs], 'best': float(best)})
+        if du.is_main():
+            s.save_checkpoint(last_ckpt, epoch, {'EERs': [float(x) for x in EERs], 'best': float(best)})
+        du.barrier()
         ep_times.append(time.time() - t0)
         epoch += 1
-    score_file.close()
+    if score_file:
+        score_file.close()
+    du.cleanup()
 
 
 if __name__ == '__main__':

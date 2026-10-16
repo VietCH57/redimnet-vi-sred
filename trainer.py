@@ -6,14 +6,18 @@ Fine-tuning loop for ReDimNet / ReDimNet2 (the role ECAPAModel.py plays in the E
   * per-iteration LR schedule (linear warm-up, then cosine / exponential / constant),
     separate LRs for head and encoder, optional layer-wise decay inside the encoder
   * L2-SP regularisation towards the starting weights, margin ramp, fp16 AMP, grad clipping
-  * nn.DataParallel kept OUTSIDE the registered modules -> checkpoint keys do not change
+  * multi-GPU: DistributedDataParallel when launched with torchrun (recommended), or the older
+    nn.DataParallel (--data_parallel, single process). Both wrappers are kept OUTSIDE the registered
+    modules -> checkpoint keys do not change. With DDP, head initialisation and evaluation are
+    split over the GPUs; only rank 0 writes files.
 '''
 
-import math, os, random, sys, time
+import contextlib, math, os, random, sys, time
 import numpy, torch
 import torch.nn as nn
 import torch.nn.functional as F
 import models
+import dist_utils as du
 from loss import AAMsoftmax
 from dataLoader import load_wav, SR
 from inference import parse_trials, extract_embeddings, score_trials, mean_embedding, subset_metrics
@@ -27,6 +31,19 @@ def _specaug_override(args):
     if args.specaug_time:
         sp['time_mask_width'] = list(args.specaug_time)
     return sp
+
+
+class _EncHead(nn.Module):
+    '''encoder + AAM head in one module, so that DDP synchronises the gradients of both.'''
+
+    def __init__(self, enc, head, amp):
+        super().__init__()
+        self.enc, self.head, self.amp = enc, head, amp
+
+    def forward(self, x, y):
+        with torch.autocast('cuda', dtype=torch.float16, enabled=self.amp):
+            e = self.enc(x)
+        return self.head(e.float(), y)
 
 
 class Trainer(nn.Module):
@@ -43,11 +60,16 @@ class Trainer(nn.Module):
         self.head = AAMsoftmax(n_class, self.encoder.embed_dim, m=args.m, s=args.s).to(self.device)
         self.n_class = n_class
         self._train_encoder = [self.encoder]
-        if args.data_parallel and self.device.type == 'cuda' and torch.cuda.device_count() > 1:
+        self.ddp = du.is_dist()
+        if self.ddp:
+            print('DistributedDataParallel: %d processes (this is rank %d, device %s)' % (du.world(), du.rank(), self.device))
+        elif args.data_parallel and self.device.type == 'cuda' and torch.cuda.device_count() > 1:
             self._train_encoder = [nn.DataParallel(self.encoder)]
-            print('DataParallel on %d GPUs' % torch.cuda.device_count())
+            print('DataParallel on %d GPUs (slow for ReDimNet: prefer torchrun)' % torch.cuda.device_count())
         self._build_optimizer()
         self.amp = bool(args.amp) and self.device.type == 'cuda'
+        self._combo = [_EncHead(self.encoder, self.head, self.amp)]   # list: not a registered sub-module
+        self._ddp_model, self._ddp_frozen = None, None
         self.scaler = torch.amp.GradScaler('cuda', enabled=self.amp)
         self.anchor = None
         self.center = None          # (mean_full, mean_crops) of the last evaluation
@@ -119,11 +141,12 @@ class Trainer(nn.Module):
             return
         if state is not None:
             sd = state
-        elif os.path.exists(path):
+        elif du.is_main() and os.path.exists(path):
             sd = torch.load(path, map_location=self.device)
-        else:
+        else:   # start of the run: identical weights on every rank
             sd = {k: v.detach().clone() for k, v in self.encoder.named_parameters()}
-            torch.save(sd, path)
+            if du.is_main() and not os.path.exists(path):
+                torch.save(sd, path)
         self.anchor = [(p, sd[k].to(self.device)) for k, p in self.encoder.named_parameters()]
 
     def l2sp_loss(self):
@@ -146,7 +169,28 @@ class Trainer(nn.Module):
     def _mem(self):
         if self.device.type != 'cuda':
             return ''
+        if self.ddp:
+            return ' | GPU%d peak %.1f GB' % (self.device.index, torch.cuda.max_memory_allocated(self.device) / 2 ** 30)
         return ' | GPU peak ' + '/'.join('%.1f' % (torch.cuda.max_memory_allocated(i) / 2 ** 30) for i in range(torch.cuda.device_count())) + ' GB'
+
+    def _forward_fn(self, frozen):
+        '''Callable (data, labels) -> (loss, acc). With DDP the wrapper is rebuilt when the set of trainable
+        parameters changes (frozen encoder -> full network), because DDP registers them at construction.'''
+        if not self.ddp:
+            enc = self._train_encoder[0]
+
+            def fwd(x, y):
+                with torch.autocast('cuda', dtype=torch.float16, enabled=self.amp):
+                    e = enc(x)
+                return self.head(e.float(), y)
+            return fwd, None
+        if self._ddp_model is None or self._ddp_frozen != frozen:
+            from torch.nn.parallel import DistributedDataParallel as DDP
+            ids = [self.device.index] if self.device.type == 'cuda' else None
+            self._ddp_model = DDP(self._combo[0], device_ids=ids, output_device=ids[0] if ids else None,
+                                  broadcast_buffers=self.args.bn_mode == 'train')   # frozen BN stats are identical anyway
+            self._ddp_frozen = frozen
+        return self._ddp_model, self._ddp_model
 
     def train_network(self, epoch, loader):
         a = self.args
@@ -159,19 +203,21 @@ class Trainer(nn.Module):
         n_reg = 0
         t0 = time.time()
         accum = max(1, a.accum_steps)
+        fwd, ddp = self._forward_fn(frozen)
+        show = du.is_main()
         self.optim.zero_grad(set_to_none=True)
         for num, (data, labels) in enumerate(loader, start=1):
             t = epoch - 1 + (num - 1) / n_batches
             lr_head, lr_enc = self._set_lr(t, frozen)
             self.head.set_margin(self.margin_at(t))
             data, labels = data.to(self.device, non_blocking=True), labels.to(self.device, non_blocking=True)
-            with torch.autocast('cuda', dtype=torch.float16, enabled=self.amp):
-                emb = self._train_encoder[0](data)
-            loss, acc = self.head(emb.float(), labels)
             step = num % accum == 0 or num == n_batches
-            reg = self.l2sp_loss() if (step and not frozen) else None     # once per optimiser step
-            total = loss / accum if reg is None else loss / accum + reg
-            self.scaler.scale(total).backward()
+            sync = ddp.no_sync() if (ddp is not None and not step) else contextlib.nullcontext()
+            with sync:
+                loss, acc = fwd(data, labels)
+                reg = self.l2sp_loss() if (step and not frozen) else None     # once per optimiser step
+                total = loss / accum if reg is None else loss / accum + reg
+                self.scaler.scale(total).backward()
             if step:
                 if a.grad_clip > 0:
                     self.scaler.unscale_(self.optim)
@@ -182,15 +228,18 @@ class Trainer(nn.Module):
                 if reg is not None:
                     tot_reg += reg.item(); n_reg += 1
             tot_loss += loss.item(); tot_acc += acc.item()
-            if num % a.log_interval == 0 or num == n_batches:
+            if show and (num % a.log_interval == 0 or num == n_batches):
                 el = time.time() - t0
                 sys.stderr.write(time.strftime('%m-%d %H:%M:%S') +
                                  ' [%2d] %s%.1f%% | lr_enc %.2e lr_head %.2e m %.3f | loss %.4f acc %.2f%% l2sp %.2e | %.1f min/epoch%s\r'
                                  % (epoch, 'FROZEN ' if frozen else '', 100 * num / n_batches, lr_enc, lr_head, self.head.m,
                                     tot_loss / num, tot_acc / num, tot_reg / max(n_reg, 1), el / num * n_batches / 60, self._mem()))
                 sys.stderr.flush()
-        sys.stderr.write('\n')
-        return {'loss': tot_loss / n_batches, 'acc': tot_acc / n_batches, 'l2sp': tot_reg / max(n_reg, 1),
+        if show:
+            sys.stderr.write('\n')
+        st = torch.tensor([tot_loss / n_batches, tot_acc / n_batches], device=self.device)
+        st = du.all_reduce_sum(st) / du.world()          # average over GPUs
+        return {'loss': st[0].item(), 'acc': st[1].item(), 'l2sp': tot_reg / max(n_reg, 1),
                 'lr_enc': lr_enc, 'lr_head': lr_head, 'margin': self.head.m, 'frozen': frozen}
 
     # ------------------------------------------------------------------ head initialisation
@@ -205,7 +254,8 @@ class Trainer(nn.Module):
             by_spk.setdefault(l, []).append(i)
         pick = [(l, i) for l, idx in sorted(by_spk.items()) for i in rng.sample(idx, min(utts_per_spk, len(idx)))]
         L = int(sec * SR)
-        items = [(k, l, i) for k in range(len(trainset.speeds)) for l, i in pick]
+        all_items = [(k, l, i) for k in range(len(trainset.speeds)) for l, i in pick]
+        items = all_items[du.rank()::du.world()]           # DDP: every GPU embeds its share
         speeds, files, crop = trainset.speeds, trainset.files, trainset._speed
 
         class _DS(torch.utils.data.Dataset):
@@ -216,16 +266,17 @@ class Trainer(nn.Module):
                 k, _, i = items[j]
                 x = crop(load_wav(files[i]).astype(numpy.float64), speeds[k], L, center=True)
                 return torch.from_numpy(x.astype(numpy.float32))
-        dl = torch.utils.data.DataLoader(_DS(), batch_size=64, num_workers=self.args.n_cpu)
+        dl = torch.utils.data.DataLoader(_DS(), batch_size=64, num_workers=self.workers())
         self.encoder.eval()
         embs = []
         for x in dl:
             with torch.autocast('cuda', dtype=torch.float16, enabled=self.amp):
                 embs.append(F.normalize(self.encoder(x.to(self.device)).float(), dim=1).cpu())
-        E = torch.cat(embs)
-        cls = torch.tensor([l + k * trainset.n_spk for k, l, _ in items])
-        C = torch.zeros(self.n_class, E.shape[1]).index_add_(0, cls, E)
-        self.head.init_from_centroids(F.normalize(C, dim=1).to(self.device))
+        E = torch.cat(embs) if embs else torch.zeros(0, self.encoder.embed_dim)
+        cls = torch.tensor([l + k * trainset.n_spk for k, l, _ in items], dtype=torch.long)
+        C = torch.zeros(self.n_class, self.encoder.embed_dim).index_add_(0, cls, E).to(self.device)
+        C = du.all_reduce_sum(C)
+        self.head.init_from_centroids(F.normalize(C, dim=1))
         print('Head initialised with class centroids (%d utterances x %d speeds, %d classes)' % (len(pick), len(speeds), self.n_class))
 
     # ------------------------------------------------------------------ evaluation
@@ -239,17 +290,34 @@ class Trainer(nn.Module):
         files = sorted(set(enroll) | set(test))
         kw = dict(device=self.device, mode=a.eval_mode, eval_sec=a.eval_sec, num_eval=a.num_eval,
                   min_sec=a.eval_min_sec, max_sec=a.eval_max_sec, len_tol=a.eval_len_tol,
-                  max_batch=a.eval_batch, amp=a.eval_amp, workers=a.n_cpu, progress=False)
-        emb = extract_embeddings(self.encoder, files, eval_path, **kw)
+                  max_batch=a.eval_batch, amp=a.eval_amp, workers=self.workers(), progress=False)
+        emb = self._embed(files, eval_path, kw)
+        cemb = self._embed(cohort[0], cohort[1], kw) if (cohort and cohort[0]) else None
+        if not du.is_main():
+            return None
         scores = score_trials(emb, enroll, test, a.eval_mode)
         res = compute_metrics(scores, labels, p_targets)
         if eval_meta:
             res.update(subset_metrics(scores, labels, enroll, test, eval_meta, p_targets[0]))
-        if cohort and cohort[0]:
-            cemb = extract_embeddings(self.encoder, cohort[0], cohort[1], **kw)
+        if cemb is not None:
             self.center = mean_embedding(cemb)
             res['EER_center'] = compute_metrics(score_trials(emb, enroll, test, a.eval_mode, self.center), labels, [])['EER']
         return res
+
+    def workers(self):
+        '''DataLoader workers of this process: --n_cpu is the total, shared by the DDP processes.'''
+        return max(1, self.args.n_cpu // du.world())
+
+    def _embed(self, files, root, kw):
+        '''Embeddings of `files`; with DDP every rank embeds files[rank::world] and rank 0 receives all.'''
+        if not self.ddp:
+            return extract_embeddings(self.encoder, files, root, **kw)
+        part = extract_embeddings(self.encoder, files[du.rank()::du.world()], root, **kw) if files[du.rank()::du.world()] else {}
+        parts = du.gather_objects(part)
+        out = {}
+        for p in parts:
+            out.update(p)
+        return out
 
     # ------------------------------------------------------------------ checkpoints
     def save_model(self, path, **meta):
