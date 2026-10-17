@@ -1,0 +1,66 @@
+# ReDimNet2-B4 (6.66M) - large-margin fine-tuning on Vi-SRED26.
+# = the official B4 LM recipe, PalabraAI/redimnet2
+#   applications/speaker_rec/examples/vox2/recipes/redimnet2/b4/lm.yaml  [R2-LM]
+# Every value below is copied from it except the lines marked DEVIATION. Data paths are passed on the
+# command line (python train.py --config this.yaml --train_list ... --train_path ... --save_path ...).
+pretrained: redimnet2:b4-vox2-lm        # the checkpoint produced by [R2-LM] (allowed in Vi-SRED26)
+max_params: 7000000
+
+# data
+crop_sec: [6.015]          # [R2-LM] num_frms 600 -> (600-1)*10 ms + 25 ms
+min_dur: 1.0               # [R2] filter_args default min_num_frames 100 (1.0 s)
+speed_perturb: []          # [R2-LM] speed_perturb: false
+aug_chain: wespeaker_lite  # [R2-LM] aug_setup.type wespeaker_augs, preset default
+aug_prob: 0.6              # [R2-LM]
+aug_preset: default
+gain_prob: 1.0             # [R2] add_reverb_noise_gain defaults
+gain_db: [-18.0, 6.0]
+specaug: checkpoint        # [R2-LM] spec_params.do_spec_aug false (= the checkpoint's model_config)
+
+# head / loss
+loss: sf2                  # [R2-LM] projection_args.project_type sphereface2
+sf2_margin_type: C
+sf2_lanbuda: 0.7
+sf2_t: 3
+s: 32.0
+m: 0.3                     # [R2-LM] margin_update 0.3 -> 0.3 (constant)
+m_start: 0.3
+m_increase_start_epoch: 1
+m_fix_start_epoch: 1
+head_init: centroid        # DEVIATION: [R2] copies rows of known speakers (reassemble_projection_head);
+                           # Vi-SRED speakers are new -> centroid rows (weight imprinting, Qi et al. CVPR 2018).
+                           # With --initial_model <FT last.ckpt> the FT rows are copied as in [R2].
+
+# optimiser / schedule
+optimizer: sgd             # [R2-LM] SGD momentum 0.9 nesterov
+momentum: 0.9
+nesterov: true
+weight_decay: 0.0001       # [R2-LM]
+head_wd_mult: 1.0          # [R2-LM] loss_weight_decay_mult not set -> 1.0
+scheduler: exp             # [R2-LM] ExponentialDecrease
+lr: 0.0001                 # [R2-LM] initial_lr
+final_lr: 0.000025         # [R2-LM] final_lr
+lr_scale_ratio: -1         # [R2] train.py: scale_ratio = world_size * batch_size / 64
+warmup_epochs: 1           # [R2-LM] warm_up_epoch 1, warm_from_zero true
+warm_from_zero: true
+max_epoch: 5               # [R2-LM] num_epochs 5
+batch_size: 128            # [R2-LM] batch_size 64 per GPU x 2 GPUs (Kaggle). The notebook may split it with
+accum_steps: 1             #   accum_steps if it does not fit; scale_ratio uses batch_size * accum_steps.
+amp: true                  # [R2-LM] enable_amp true (head in fp32 as executor.run_epoch)
+grad_clip: 0               # [R2] executor.run_epoch: no clipping
+freeze_epochs: 0
+l2sp: 0
+layer_decay: 1.0
+bn_mode: train
+
+# evaluation (not part of [R2]; held-out Vi-SRED speakers, see configs/README.md)
+eval_mode: full            # [R2 paper] cosine on full-length utterances
+eval_len_tol: 0.02
+cohort_size: 1000
+select_score: center       # WeSpeaker local/score.sh: cosine after subtracting the training mean (cal_mean True)
+test_step: 1
+eval_init: true
+seed: 42                   # [R2-LM]
+n_cpu: 4
+keep_last: 2
+max_hours: 11.0

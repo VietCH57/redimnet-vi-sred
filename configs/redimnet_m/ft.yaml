@@ -1,0 +1,59 @@
+# ReDimNet-M (4.81M) - in-domain fine-tuning on Vi-SRED26 (optional stage before lm.yaml).
+# No official recipe exists for adapting a trained ReDimNet to a new speaker set. This stage is
+# configs/redimnet_m/lm.yaml (WeSpeaker LM recipe [WS-LM]) with the three settings that the LM stage
+# changes with respect to pre-training reverted to the pre-training values of
+#   [RD]    Yakovlev et al., Interspeech 2024, Sec. 3.1: 2 s segments, speed 0.9/1.1, AAM margin -> 0.2
+#   [WS-RD] wenet-e2e/wespeaker examples/voxceleb/v2/conf/redimnet.yaml: num_frms 200, speed_perturb True,
+#           final_margin 0.2, scale 32
+# Fine-tuning on target-domain data with speed-perturbed speaker classes: DKU-MSXF, VoxSRC-23
+# domain-adaptation track (arXiv 2308.08766, Sec. 4).
+pretrained: redimnet:M-vb2+vox2+cnc-ft_mix
+max_params: 7000000
+
+crop_sec: [2.015]          # [WS-RD] num_frms 200 ([RD] "2-second segments")
+min_dur: 1.0
+speed_perturb: [0.9, 1.1]  # [RD] / [WS-RD]: x3 classes
+aug_chain: wespeaker       # [WS-RD] aug_prob 0.6, upstream WeSpeaker augmentation
+aug_prob: 0.6
+specaug: checkpoint        # [WS-RD] spec_aug False for training from scratch; the M checkpoint's own
+                           #   model_config has do_spec_aug true -> keep what the checkpoint was trained with
+
+loss: aam                  # [RD] / [WS-RD] arc_margin
+s: 32.0
+m: 0.2                     # [RD] / [WS-RD] final margin 0.2 (the 0 -> 0.2 ramp is for training from scratch)
+m_start: 0.2
+m_increase_start_epoch: 1
+m_fix_start_epoch: 1
+head_init: centroid        # DEVIATION (see lm.yaml)
+
+optimizer: sgd             # [WS-LM]
+momentum: 0.9
+nesterov: true
+weight_decay: 0.0001       # [WS-LM]
+head_wd_mult: 1.0
+scheduler: exp             # [WS-LM]
+lr: 0.0001                 # [WS-LM]
+final_lr: 0.000025         # [WS-LM]
+lr_scale_ratio: -1
+warmup_epochs: 1           # [WS-LM]
+warm_from_zero: true
+max_epoch: 5               # [WS-LM]
+batch_size: 128            # 64 per GPU x 2
+accum_steps: 1
+amp: true                  # DEVIATION (see lm.yaml)
+grad_clip: 0
+freeze_epochs: 0
+l2sp: 0
+layer_decay: 1.0
+bn_mode: train
+
+eval_mode: full
+eval_len_tol: 0.02
+cohort_size: 1000
+select_score: center
+test_step: 1
+eval_init: true
+seed: 42
+n_cpu: 4
+keep_last: 2
+max_hours: 11.0

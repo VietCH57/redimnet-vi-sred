@@ -22,8 +22,8 @@ validation trials (speakers disjoint from training); the test sets are only scor
   5. Band-limited view (test-time, no parameters): the EDA of the training set shows 23 % of the
      files have <= 4 kHz effective bandwidth (telephone / codec / low-cost microphones) and on
      validation, target trials across bandwidths are clearly harder. The same encoder is run on the
-     waveform band-limited to 4 kHz (16k -> 8k -> 16k resampling, the '8k' narrow-band simulation of
-     dataLoader.py), and the two L2-normalised embeddings can be averaged ("full+lp4k"). The view
+     waveform band-limited to 4 kHz (16k -> 8k -> 16k resampling), and the two L2-normalised
+     embeddings can be averaged ("full+lp4k"). The view
      and the fusion are selected on validation like everything else.
   4. Quality measure function (QMF, Thienpondt et al., "The IDLAB VoxSRC-20 submission",
      arXiv:2010.11255): logistic regression on [score, log min duration, log max duration],

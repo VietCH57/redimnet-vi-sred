@@ -1,7 +1,11 @@
 '''
 Command-line / config-file arguments for train.py.
 Priority: command line  >  --config file (YAML or JSON)  >  defaults below.
-Defaults = the fine-tuning recipe for ReDimNet-M on Vi-SRED26 (see README).
+
+The defaults follow the official large-margin fine-tuning (LM) recipe of ReDimNet2
+(PalabraAI/redimnet2, applications/speaker_rec/examples/vox2/recipes/redimnet2/b4/lm.yaml), which is the
+WeSpeaker LM recipe (wespeaker examples/voxceleb/v2/conf/resnet_lm.yaml) with the ReDimNet2 loss.
+The recipes in configs/ set every value explicitly and give the source of each one (see configs/README.md).
 '''
 
 import argparse, json
@@ -20,17 +24,18 @@ def _str2bool(v):
 def _floats(v):
     if isinstance(v, (list, tuple)):
         return [float(x) for x in v]
-    return [float(x) for x in str(v).replace(' ', '').split(',') if x != '']
+    return [float(x) for x in str(v).replace(' ', '').replace('[', '').replace(']', '').split(',') if x != '']
 
 
 def _ints(v):
     return [int(round(x)) for x in _floats(v)]
 
 
-def _strs(v):
-    if isinstance(v, (list, tuple)):
-        return [str(x) for x in v]
-    return [x for x in str(v).replace(' ', '').split(',') if x != '']
+def _specaug(v):
+    v = str(v).lower()
+    if v in ('checkpoint', 'ckpt', 'keep'):
+        return 'checkpoint'
+    return 'true' if _str2bool(v) else 'false'
 
 
 def build_parser():
@@ -41,64 +46,80 @@ def build_parser():
     g = p.add_argument_group('Data')
     g.add_argument('--train_list', type=str, default='', help='Training list, each line "<speaker> <relative/path.wav>"')
     g.add_argument('--train_path', type=str, default='', help='Root folder of the training wavs')
-    g.add_argument('--crop_sec', type=_floats, default=[2.0, 3.0], help='Training crop lengths (s); one is drawn per batch')
+    g.add_argument('--crop_sec', type=_floats, default=[6.015], help='Training crop length(s) in s; one is drawn per batch. '
+                   'Official: (num_frms - 1) * 10 ms + 25 ms = 2.015 s (200 frames, pre-training) / 6.015 s (600 frames, LM)')
     g.add_argument('--crop_probs', type=_floats, default=[], help='Probabilities of --crop_sec (empty = uniform)')
-    g.add_argument('--batch_size', type=int, default=64, help='Global batch size (split over the GPUs with torchrun / --data_parallel)')
+    g.add_argument('--min_dur', type=float, default=1.0, help='Skip training files shorter than this (s). Official filter: min_num_frames 100 = 1.0 s')
+    g.add_argument('--batch_size', type=int, default=128, help='Global batch per forward pass (split over the GPUs with torchrun)')
+    g.add_argument('--accum_steps', type=int, default=1, help='Gradient accumulation: effective batch = batch_size * accum_steps')
     g.add_argument('--n_cpu', type=int, default=8, help='DataLoader workers in total (with torchrun they are shared by the GPU processes)')
     g.add_argument('--seed', type=int, default=42, help='Random seed (-1 = do not seed)')
 
-    g = p.add_argument_group('Augmentation (waveform)')
-    g.add_argument('--musan_path', type=str, default='', help='MUSAN root (folder with music/ noise/ speech/, or a parent). Empty = off')
-    g.add_argument('--rir_path', type=str, default='', help='RIR root (simulated_rirs is used if found below it). Empty = off')
-    g.add_argument('--aug_probs', type=_floats, default=[1, 1, 1, 1, 1, 1], help='Relative weights of [clean, reverb, babble, music, noise, tv]')
-    g.add_argument('--snr_noise', type=_floats, default=[0, 15], help='SNR range (dB) for MUSAN noise')
-    g.add_argument('--snr_speech', type=_floats, default=[13, 20], help='SNR range (dB) for babble')
-    g.add_argument('--snr_music', type=_floats, default=[5, 15], help='SNR range (dB) for music')
-    g.add_argument('--num_noise', type=_ints, default=[1, 1], help='Number of noise files mixed (min,max)')
-    g.add_argument('--num_speech', type=_ints, default=[3, 8], help='Number of babble speakers (min,max)')
-    g.add_argument('--num_music', type=_ints, default=[1, 1], help='Number of music files mixed (min,max)')
-    g.add_argument('--speed_perturb', type=_floats, default=[0.9, 1.1], help='Extra speeds; each one adds a copy of every speaker as new classes. Empty = off')
-    g.add_argument('--speed_probs', type=_floats, default=[], help='Probabilities of [1.0, *speed_perturb] (empty = uniform)')
-    g.add_argument('--narrowband_prob', type=float, default=0.2, help='Probability of a narrow-band channel (after noise/reverb)')
-    g.add_argument('--narrowband_types', type=_strs, default=['8k', 'tel'], help='8k = resample to 8 kHz and back, tel = 300-3400 Hz band')
+    g = p.add_argument_group('Augmentation (waveform, official wespeaker_lite chains, see dataLoader.py)')
+    g.add_argument('--musan_path', type=str, default='', help='MUSAN root (folder with music/ noise/ speech/, or a parent)')
+    g.add_argument('--rir_path', type=str, default='', help='RIR root (simulated_rirs is used if found below it)')
+    g.add_argument('--aug_chain', type=str, default='wespeaker_lite', choices=['wespeaker', 'wespeaker_lite', 'hard', 'none'],
+                   help='wespeaker = upstream WeSpeaker add_reverb_noise (ReDimNet); wespeaker_lite = add_reverb_noise_gain '
+                        '(ReDimNet2 VoxCeleb2 recipes); hard = Sequential tree of the ReDimNet2 vb2+vox2+cnc2 recipes')
+    g.add_argument('--aug_prob', type=float, default=0.6, help='[wespeaker, wespeaker_lite] probability of augmenting a sample')
+    g.add_argument('--aug_preset', type=str, default='default', choices=['default', 'medium', 'hard'], help='[wespeaker_lite] SNR preset')
+    g.add_argument('--gain_prob', type=float, default=1.0, help='[wespeaker_lite] probability of the random gain')
+    g.add_argument('--gain_db', type=_floats, default=[-18.0, 6.0], help='[wespeaker_lite] gain range (dB)')
+    g.add_argument('--hard_prob', type=float, default=0.9, help='[hard] probability of the whole tree (ptn_ha 0.9, LM 0.7)')
+    g.add_argument('--hard_noise_prob', type=float, default=0.8, help='[hard] probability of the MUSAN OneOf')
+    g.add_argument('--hard_reverb_prob', type=float, default=0.2, help='[hard] probability of reverberation')
+    g.add_argument('--lowpass_prob', type=float, default=0.25, help='[hard] probability of the low-pass filter')
+    g.add_argument('--lowpass_cutoffs', type=_floats, default=[0.6], help='[hard] cutoff(s) as a fraction of Nyquist (0.6 used, 0.5 = 4 kHz in the official comments)')
+    g.add_argument('--lowpass_width', type=float, default=0.08, help='[hard] transition width (fraction of Nyquist)')
+    g.add_argument('--speed_perturb', type=_floats, default=[], help='Extra speeds (official pre-training: 0.9,1.1); each one adds a copy of every speaker as new classes. Empty = off (official LM)')
+    g.add_argument('--speed_probs', type=_floats, default=[], help='Probabilities of [1.0, *speed_perturb] (empty = uniform, as official)')
 
     g = p.add_argument_group('SpecAugment (inside the model front-end, training only, no parameters)')
-    g.add_argument('--specaug', type=_str2bool, default=True, help='Enable SpecAugment')
+    g.add_argument('--specaug', type=_specaug, default='checkpoint', help='checkpoint = keep the do_spec_aug of the pretrained model_config; true / false = force')
     g.add_argument('--specaug_freq', type=_ints, default=[], help='Frequency mask width [min,max); empty = keep the checkpoint value')
     g.add_argument('--specaug_time', type=_ints, default=[], help='Time mask width [min,max); empty = keep the checkpoint value')
 
     g = p.add_argument_group('Model & loss')
-    g.add_argument('--pretrained', type=str, default='redimnet:M-vb2+vox2+cnc-ft_mix',
+    g.add_argument('--pretrained', type=str, default='redimnet2:b4-vox2-lm',
                    help='"redimnet:<release name>", "redimnet2:<release name>" or a checkpoint path')
     g.add_argument('--ckpt_dir', type=str, default='', help='Download cache for release checkpoints (default ~/.cache/redimnet-vi-sred)')
     g.add_argument('--max_params', type=float, default=7e6, help='Refuse an encoder with more parameters (0 = no check)')
-    g.add_argument('--m', type=float, default=0.2, help='AAM-softmax margin')
-    g.add_argument('--m_start', type=float, default=0.0, help='Margin at the start of training (ramped linearly to --m)')
-    g.add_argument('--m_warmup_epochs', type=float, default=0, help='Epochs to ramp the margin from --m_start to --m (0 = constant --m)')
-    g.add_argument('--s', type=float, default=30, help='AAM-softmax scale')
-    g.add_argument('--n_class', type=int, default=0, help='Ignored: always computed from --train_list (x number of speeds)')
+    g.add_argument('--loss', type=str, default='sf2', choices=['aam', 'sf2'], help='aam = WeSpeaker ArcMarginProduct + CE; sf2 = SphereFace2 (ReDimNet2)')
+    g.add_argument('--m', type=float, default=0.3, help='Final margin (SF2-C: 0.2 pre-training / 0.3 LM; AAM: 0.2 / 0.5)')
+    g.add_argument('--s', type=float, default=32.0, help='Scale (32 in every official recipe)')
+    g.add_argument('--sf2_lanbuda', type=float, default=0.7, help='[sf2] weight of the positive term')
+    g.add_argument('--sf2_t', type=int, default=3, help='[sf2] t of the similarity adjustment g(z)')
+    g.add_argument('--sf2_margin_type', type=str, default='C', choices=['A', 'C'])
+    g.add_argument('--m_start', type=float, default=-1.0, help='Initial margin of the official MarginScheduler (-1 = same as --m, i.e. constant)')
+    g.add_argument('--m_increase_start_epoch', type=float, default=1, help='MarginScheduler increase_start_epoch (1-based, as official)')
+    g.add_argument('--m_fix_start_epoch', type=float, default=1, help='MarginScheduler fix_start_epoch (margin = --m from here on)')
+    g.add_argument('--m_increase_type', type=str, default='exp', choices=['exp', 'linear'])
     g.add_argument('--head_init', type=str, default='centroid', choices=['centroid', 'random'],
-                   help='centroid = class weights = speaker centroids of the pretrained encoder')
+                   help='Head rows of speakers without trained rows: centroid = mean embedding of the pretrained encoder (weight imprinting); random = xavier (official fallback)')
     g.add_argument('--head_init_utts', type=int, default=4, help='[centroid] utterances per speaker')
-    g.add_argument('--head_init_sec', type=float, default=3.0, help='[centroid] crop length (s)')
+    g.add_argument('--head_init_sec', type=float, default=3.0, help='[centroid] centre crop length (s)')
 
-    g = p.add_argument_group('Optimisation')
-    g.add_argument('--max_epoch', type=int, default=20, help='Number of epochs')
-    g.add_argument('--optimizer', type=str, default='adamw', choices=['adamw', 'adam', 'sgd'])
-    g.add_argument('--lr_backbone', type=float, default=1e-4, help='Peak LR of the encoder (its top layers with --layer_decay)')
-    g.add_argument('--lr_head', type=float, default=1e-3, help='Peak LR of the AAM head')
-    g.add_argument('--layer_decay', type=float, default=1.0, help='LR of encoder block k = lr_backbone * layer_decay^(depth-k) (1 = same LR everywhere)')
-    g.add_argument('--scheduler', type=str, default='cosine', choices=['cosine', 'exp', 'const'])
-    g.add_argument('--lr_min_ratio', type=float, default=0.01, help='[cosine] final LR = peak * ratio')
-    g.add_argument('--lr_decay', type=float, default=0.95, help='[exp] LR multiplied by this every epoch')
-    g.add_argument('--warmup_epochs', type=float, default=1.0, help='Linear LR warm-up (epochs, after --freeze_epochs)')
-    g.add_argument('--freeze_epochs', type=int, default=1, help='Epochs training only the head (encoder frozen, BN statistics fixed)')
-    g.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay (not applied to biases / norm layers)')
-    g.add_argument('--l2sp', type=float, default=1e-4, help='L2-SP: penalty l2sp/2 * ||w - w_start||^2 on the encoder (0 = off)')
-    g.add_argument('--accum_steps', type=int, default=1, help='Gradient accumulation: one optimiser step every N batches (effective batch = batch_size * N)')
-    g.add_argument('--bn_mode', type=str, default='frozen', choices=['train', 'frozen'], help='frozen = keep the pretrained BatchNorm running statistics (affine weights still train); train = update them from the batches')
-    g.add_argument('--grad_clip', type=float, default=5.0, help='Clip grad-norm (0 = off)')
-    g.add_argument('--amp', type=_str2bool, default=True, help='Mixed precision (fp16) training on CUDA')
+    g = p.add_argument_group('Optimisation (official: SGD Nesterov + ExponentialDecrease, LR x scale_ratio)')
+    g.add_argument('--max_epoch', type=int, default=5, help='Number of epochs (official LM: 5)')
+    g.add_argument('--optimizer', type=str, default='sgd', choices=['sgd', 'adamw', 'adam'])
+    g.add_argument('--momentum', type=float, default=0.9, help='[sgd]')
+    g.add_argument('--nesterov', type=_str2bool, default=True, help='[sgd]')
+    g.add_argument('--lr', type=float, default=1e-4, help='initial_lr of the scheduler (before x scale_ratio)')
+    g.add_argument('--final_lr', type=float, default=2.5e-5, help='final_lr of the scheduler (before x scale_ratio)')
+    g.add_argument('--lr_scale_ratio', type=float, default=-1, help='LR multiplier; -1 = official rule: effective global batch / 64 (world_size * batch_size / 64)')
+    g.add_argument('--scheduler', type=str, default='exp', choices=['exp', 'cosine', 'const'], help='exp = official ExponentialDecrease (per iteration)')
+    g.add_argument('--warmup_epochs', type=float, default=1.0, help='warm_up_epoch of the scheduler')
+    g.add_argument('--warm_from_zero', type=_str2bool, default=True, help='Warm-up from LR 0 (official LM: True)')
+    g.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay of the encoder (official LM 1e-4, pre-training 2e-5)')
+    g.add_argument('--head_wd_mult', type=float, default=1.0, help='Head weight decay = weight_decay * this (official loss_weight_decay_mult)')
+    g.add_argument('--wd_skip_1d', type=_str2bool, default=False, help='No weight decay on biases / norm weights (official: False = decay everything)')
+    g.add_argument('--lr_head_mult', type=float, default=1.0, help='Head LR = encoder LR * this (official: 1)')
+    g.add_argument('--layer_decay', type=float, default=1.0, help='LR of encoder block k = lr * layer_decay^(depth-k) (1 = official)')
+    g.add_argument('--freeze_epochs', type=int, default=0, help='Epochs training only the head (0 = official)')
+    g.add_argument('--l2sp', type=float, default=0.0, help='L2-SP penalty l2sp/2 * ||w - w_start||^2 on the encoder (0 = official)')
+    g.add_argument('--bn_mode', type=str, default='train', choices=['train', 'frozen'], help='train = official; frozen = keep pretrained BN running statistics')
+    g.add_argument('--grad_clip', type=float, default=0.0, help='Clip grad-norm (0 = off, official)')
+    g.add_argument('--amp', type=_str2bool, default=True, help='Mixed precision (fp16) for the encoder; the head always runs in fp32 (official enable_amp: true)')
 
     g = p.add_argument_group('Evaluation during training')
     g.add_argument('--eval_list', type=str, default='', help='Trial list ("label a b" or "a b target|nontarget"). Empty = no evaluation')
@@ -106,12 +127,12 @@ def build_parser():
     g.add_argument('--eval_meta', type=str, default='', help='Optional val_trials_meta.csv -> subset EERs')
     g.add_argument('--test_step', type=int, default=1, help='Evaluate and save every N epochs')
     g.add_argument('--eval_init', type=_str2bool, default=True, help='Evaluate the starting model before training (logged as epoch 0)')
-    g.add_argument('--eval_mode', type=str, default='full', choices=['full', 'crops', 'both'])
+    g.add_argument('--eval_mode', type=str, default='full', choices=['full', 'crops', 'both'], help='full = whole utterance (official scoring)')
     g.add_argument('--eval_sec', type=float, default=3.0, help='[crops] crop length (s)')
     g.add_argument('--num_eval', type=int, default=5, help='[crops] crops per utterance')
     g.add_argument('--eval_min_sec', type=float, default=1.0, help='Shorter files are repeat-padded to this length')
     g.add_argument('--eval_max_sec', type=float, default=60.0, help='Longer files are cut (0 = never)')
-    g.add_argument('--eval_len_tol', type=float, default=0.05, help='Batch files whose lengths differ by <= this fraction (cut to the shortest); 0 = exact')
+    g.add_argument('--eval_len_tol', type=float, default=0.02, help='Batch files whose lengths differ by <= this fraction (cut to the shortest); 0 = exact')
     g.add_argument('--eval_batch', type=int, default=64, help='Max files per evaluation batch')
     g.add_argument('--eval_amp', type=_str2bool, default=True, help='fp16 evaluation on CUDA')
     g.add_argument('--cohort_size', type=int, default=1000, help='Training files used to estimate the mean embedding for "center" scoring (0 = off)')
@@ -120,14 +141,14 @@ def build_parser():
 
     g = p.add_argument_group('Checkpoints & logging')
     g.add_argument('--save_path', type=str, default='exps/exp1', help='Output folder (score.txt, model/, config.json)')
-    g.add_argument('--initial_model', type=str, default='', help='Start from this checkpoint instead of --pretrained (epoch restarts at 1); a last.ckpt also restores the head if the classes match')
+    g.add_argument('--initial_model', type=str, default='', help='Start from this checkpoint instead of --pretrained (epoch restarts at 1). '
+                   'A last.ckpt also gives the head: rows of the same speakers are copied (official reassemble_projection_head)')
     g.add_argument('--resume', type=str, default='auto', help='"auto" = continue from save_path/model/last.ckpt if present, "none", or a path to a last.ckpt')
     g.add_argument('--max_hours', type=float, default=0, help='Stop before this many hours are used (0 = no limit); rerun to resume')
     g.add_argument('--keep_last', type=int, default=0, help='Keep only the N newest model_XXXX.model (0 = all)')
     g.add_argument('--save_best', type=_str2bool, default=True, help='Save model/best.model (lowest EER)')
     g.add_argument('--log_interval', type=int, default=20, help='Print progress every N batches')
     g.add_argument('--device', type=str, default='cuda', help='cuda / cuda:0 / cpu')
-    g.add_argument('--data_parallel', type=_str2bool, default=False, help='Single-process nn.DataParallel over all GPUs. Slow and leaks host RAM with ReDimNet: use torchrun instead')
 
     g = p.add_argument_group('Command')
     g.add_argument('--eval', dest='eval', action='store_true', help='Only evaluate --initial_model (or --pretrained) on --eval_list and exit')
@@ -156,12 +177,14 @@ def parse_args(argv=None):
                 cfg[a.dest] = a.type(cfg[a.dest])
         parser.set_defaults(**cfg)
     args = parser.parse_args(argv)
-    if len(args.aug_probs) != 6:
-        parser.error('--aug_probs needs 6 values: clean,reverb,babble,music,noise,tv')
     if args.crop_probs and len(args.crop_probs) != len(args.crop_sec):
         parser.error('--crop_probs needs one value per --crop_sec')
+    if len(args.gain_db) != 2:
+        parser.error('--gain_db needs 2 values')
     if not args.eval and not (args.train_list and args.train_path):
         parser.error('--train_list and --train_path are required for training')
+    if args.m_start < 0:
+        args.m_start = args.m
     return args
 
 

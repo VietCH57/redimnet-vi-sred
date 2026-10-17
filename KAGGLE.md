@@ -1,63 +1,39 @@
 # Chạy trên Kaggle (2× T4)
 
-## 0. Chuẩn bị
+Cách nhanh nhất là dùng notebook `vi_sred26_finetune_redimnet.ipynb`. Ô đầu tiên của notebook có hai lựa chọn:
 
-```python
-!git clone https://github.com/VietCH57/redimnet-vi-sred.git /kaggle/working/redimnet-vi-sred
-%cd /kaggle/working/redimnet-vi-sred
-```
+- `MODEL`: `redimnet_m` (ReDimNet-M, 4.81M) hoặc `redimnet2_b4` (ReDimNet2-B4, 6.66M).
+- `LABEL_SET`: `V0` / `V1` / `V2` / `V3`, các bộ nhãn từ repo `vi-sred-data-cleaning`.
 
-Cần **bật Internet**, vì checkpoint pretrained được tải từ GitHub releases ở lần chạy đầu.
+Notebook chạy lần lượt: zero-shot trên val → FT → LM → chấm chính xác val và public test → đóng gói `results.zip`.
+
+Cần **bật Internet**, vì repo và checkpoint pretrained được tải từ GitHub.
 
 | Dataset | Đường dẫn |
 |---|---|
-| Train | `/kaggle/input/datasets/hongvitchugo/vi-sred26-train` |
+| Nhãn đã làm sạch | `/kaggle/input/datasets/hongvitchugo/vi-sred-cleaned-labels/labels` (`V0..V3/train_split.txt`, `val_trials.txt`, `val_trials_meta.csv`, `val_split.txt`) |
+| Audio train | `/kaggle/input/datasets/hongvitchugo/vi-sred26-train` |
 | Public test | `/kaggle/input/datasets/hongvitchugo/vi-sred26-publictest` |
 | MUSAN | `/kaggle/input/datasets/nhattruongdev/musan-noise` |
 | RIR | `/kaggle/input/datasets/nhattruongdev/rirs-noises` |
 
-## 1. Chọn batch size (một lần, khoảng 1 phút)
+Chạy tay (tương đương notebook):
 
 ```bash
-!python probe_memory.py --crop_sec 3 --target_batch 128
-```
-
-Lệnh in ra batch lớn nhất mỗi GPU chịu được, cùng một cặp `--batch_size` / `--accum_steps` gợi ý. Config mặc định dùng `batch_size: 64`, tức 32 mẫu mỗi GPU.
-
-## 2. Zero-shot (mốc so sánh, không cần train)
-
-```bash
-!python infer.py --mode eval --model redimnet:M-vb2+vox2+cnc-ft_mix \
-    --trials /kaggle/input/datasets/hongvitchugo/vi-sred26-train/val_trials.txt \
-    --data_path /kaggle/input/datasets/hongvitchugo/vi-sred26-train/Vi-SRED26-Train/data --out /kaggle/working/zs/val.txt
-```
-
-## 3. Fine-tune
-
-```bash
-!torchrun --standalone --nproc_per_node 2 train.py --config configs/ft_redimnet_m.yaml
-```
-
-- **Kiểm tra log trước khi để chạy lâu.** Đầu log in thư mục MUSAN/RIR tìm được, xác suất từng loại augment, số lớp (= số speaker × 3 vì speed perturb) và EER ở epoch 0 (phải xấp xỉ zero-shot: `EER` khoảng 3,0%, `EER_center` khoảng 2,4% trên val).
-- **Dòng tiến độ** in thời gian mỗi epoch và bộ nhớ GPU đỉnh. Nếu bị OOM, giảm `--batch_size` và tăng `--accum_steps`.
-- **Dùng `torchrun` để chạy 2 GPU, không dùng `--data_parallel`:** DataParallel chậm hơn cả 1 GPU và làm RAM tăng dần tới khi bị kill. Xem README.
-- **Resume khi session bị ngắt:** chạy lại đúng lệnh cũ. Nếu `last.ckpt` nằm trong output của notebook trước (đã add làm dataset), dùng `--resume /kaggle/input/.../model/last.ckpt --save_path /kaggle/working/exps/<tên>`.
-
-## 4. LMF (tuỳ chọn)
-
-```bash
-!torchrun --standalone --nproc_per_node 2 train.py --config configs/lmf_redimnet_m.yaml --initial_model /kaggle/working/exps/redimnet_m_ft/model/last.ckpt
-```
-
-## 5. File nộp
-
-```bash
-!python infer.py --mode score --model /kaggle/working/exps/redimnet_m_ft/model/best.model \
+L=/kaggle/input/datasets/hongvitchugo/vi-sred-cleaned-labels/labels
+D=/kaggle/input/datasets/hongvitchugo/vi-sred26-train/Vi-SRED26-Train/data
+DATA="--train_list $L/V0/train_split.txt --train_path $D --eval_list $L/val_trials.txt --eval_path $D --eval_meta $L/val_trials_meta.csv
+      --musan_path /kaggle/input/datasets/nhattruongdev/musan-noise --rir_path /kaggle/input/datasets/nhattruongdev/rirs-noises"
+python probe_memory.py --pretrained redimnet2:b4-vox2-lm --loss sf2 --crop_sec 6.015 --target_batch 128
+torchrun --standalone --nproc_per_node 2 train.py --config configs/redimnet2_b4/ft.yaml $DATA --save_path /kaggle/working/exps/b4_V0_ft
+torchrun --standalone --nproc_per_node 2 train.py --config configs/redimnet2_b4/lm.yaml $DATA --save_path /kaggle/working/exps/b4_V0_lm \
+         --initial_model /kaggle/working/exps/b4_V0_ft/model/last.ckpt
+python infer.py --mode score --model /kaggle/working/exps/b4_V0_lm/model/best.model \
     --trials /kaggle/input/datasets/hongvitchugo/vi-sred26-publictest/public-test.txt \
     --data_path /kaggle/input/datasets/hongvitchugo/vi-sred26-publictest/data \
-    --out /kaggle/working/submission/results.txt --zip
+    --score_norm center --out /kaggle/working/submission/results.txt --zip
 ```
 
-- **Định dạng:** `results.txt` có mỗi dòng `file1.wav file2.wav score`, cùng thứ tự với `public-test.txt`. `results.zip` là file để nộp.
-- **Chấm theo center:** thêm `--score_norm center` để dùng embedding trung bình lưu trong model. Chỉ nên dùng khi `EER_center` trên val tốt hơn `EER`.
-- **Nhãn của public test:** vì `public-test.txt` có nhãn, script in luôn EER trên public test.
+Nếu bị OOM: giảm `--batch_size` và tăng `--accum_steps` sao cho tích không đổi. LR tự nhân theo `batch_size × accum_steps / 64`, nên công thức vẫn giữ nguyên.
+
+**Resume khi session bị ngắt:** chạy lại đúng lệnh cũ. Nếu `last.ckpt` nằm trong output của notebook trước (đã add làm dataset), dùng `--resume /kaggle/input/.../model/last.ckpt --save_path /kaggle/working/exps/<tên>`.

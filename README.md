@@ -2,7 +2,7 @@
 
 Fine-tune **ReDimNet** ([IDRnD/redimnet](https://github.com/IDRnD/redimnet)) và **ReDimNet2** ([PalabraAI/redimnet2](https://github.com/PalabraAI/redimnet2)) đã pretrained cho bài toán speaker verification trên Vi-SRED26.
 
-Cách dùng giống repo [VietCH57/ECAPA-TDNN](https://github.com/VietCH57/ECAPA-TDNN): `train.py` / `infer.py`, mọi tham số truyền qua dòng lệnh hoặc YAML, tự resume, có `best.model` và `results.zip` để nộp bài.
+Công thức train theo đúng recipe chính thức của tác giả (ReDimNet2 `wespeaker_lite`, WeSpeaker), xem [`configs/README.md`](configs/README.md). Cách dùng giống repo [VietCH57/ECAPA-TDNN](https://github.com/VietCH57/ECAPA-TDNN): `train.py` / `infer.py`, mọi tham số truyền qua dòng lệnh hoặc YAML, tự resume, có `best.model` và `results.zip` để nộp bài.
 
 **Code mô hình không bị sửa.** Hai package `redimnet/` và `redimnet2/` được chép nguyên vào `third_party/`, ghim ở một commit cố định (xem `third_party/*/SOURCE.md`). Checkpoint repo này lưu ra có đúng định dạng của tác giả (`model_config` + `state_dict`), nên nạp lại được bằng code gốc hoặc `torch.hub`.
 
@@ -20,89 +20,69 @@ Checkpoint pretrained được tải tự động từ GitHub releases ở lần
 
 ## Chọn mô hình: `--pretrained`
 
-| Giá trị | Tham số | Ghi chú |
+| Giá trị | Tham số | Recipe |
 |---|---|---|
-| `redimnet:M-vb2+vox2+cnc-ft_mix` | 4.81M | mặc định; zero-shot Vi-SRED26: val 2.26%, public test 5.37% |
+| `redimnet:M-vb2+vox2+cnc-ft_mix` | 4.81M | `configs/redimnet_m/{ft,lm}.yaml` |
+| `redimnet2:b4-vox2-lm` | 6.66M | `configs/redimnet2_b4/{ft,lm}.yaml` |
 | `redimnet:S-vb2+vox2+cnc-ft_mix` | 3.15M | |
-| `redimnet2:b4-vox2-lm` | 6.66M | |
-| `redimnet2:b6-vb2+vox2+cnc2_v0-lm` | 12.46M | vượt 7M; muốn dùng phải đặt `--max_params 0` |
+| `redimnet2:b6-vb2+vox2+cnc2_v0-lm` | 12.46M | vượt 7M; muốn dùng phải đặt `--max_params 0` (chỉ để làm teacher) |
 | đường dẫn file `.pt` / `.model` / `.ckpt` | | checkpoint của tác giả hoặc của repo này |
 
 Dạng `redimnet:<tên>` / `redimnet2:<tên>` nhận mọi tên checkpoint trong release của hai repo gốc. Với `--max_params 7e6` (mặc định), repo dừng ngay nếu encoder vượt 7M tham số.
 
 ## Định dạng dữ liệu
 
-Giống repo ECAPA:
-- **Train list:** mỗi dòng `<speaker> <đường/dẫn.wav>`.
+- **Train list:** mỗi dòng `<speaker> <đường/dẫn.wav>`. Ví dụ: `V*/train_split.txt` của repo [vi-sred-data-cleaning](https://github.com/VietCH57/vi-sred-data-cleaning).
 - **Trial list:** mỗi dòng `<label> <a> <b>`, hoặc `<a> <b> target|nontarget`, hoặc `<a> <b>`.
 - **Audio:** WAV, nếu không phải 16 kHz sẽ tự resample.
 
 ## Train
 
-```bash
-python train.py --config configs/ft_redimnet_m.yaml                 # fine-tune
-python train.py --config configs/ft_redimnet_m.yaml --batch_size 48  # ghi đè tham số bất kỳ
-python train.py -h                                                  # mọi tham số và giá trị mặc định
+**Mọi giá trị trong `configs/` đều lấy từ recipe chính thức** của tác giả ReDimNet / ReDimNet2 và WeSpeaker. Bảng nguồn của từng giá trị, cùng các chỗ buộc phải lệch, nằm trong [`configs/README.md`](configs/README.md). `tests/test_official.py` so bằng số loss, lịch LR, lịch margin và low-pass của repo này với code chính thức.
 
-# nhiều GPU: mỗi GPU một tiến trình (DistributedDataParallel)
-torchrun --standalone --nproc_per_node 2 train.py --config configs/ft_redimnet_m.yaml
+YAML chỉ chứa siêu tham số; đường dẫn dữ liệu truyền qua dòng lệnh:
+
+```bash
+L=/kaggle/input/datasets/hongvitchugo/vi-sred-cleaned-labels/labels
+D=/kaggle/input/datasets/hongvitchugo/vi-sred26-train/Vi-SRED26-Train/data
+DATA="--train_list $L/V0/train_split.txt --train_path $D --eval_list $L/val_trials.txt --eval_path $D
+      --eval_meta $L/val_trials_meta.csv --musan_path <MUSAN> --rir_path <RIR>"
+
+# stage FT (tuỳ chọn): đoạn 2 s, speed perturb, margin như lúc pre-train
+torchrun --standalone --nproc_per_node 2 train.py --config configs/redimnet2_b4/ft.yaml $DATA --save_path exps/b4_ft
+# stage LM: recipe large-margin chính thức; tiếp từ FT (chép các hàng head của cùng speaker)
+torchrun --standalone --nproc_per_node 2 train.py --config configs/redimnet2_b4/lm.yaml $DATA --save_path exps/b4_lm \
+         --initial_model exps/b4_ft/model/last.ckpt
+python train.py -h        # mọi tham số và giá trị mặc định
 ```
 
-**Nhiều GPU: dùng `torchrun`, không dùng `--data_parallel`.** Đo trên Kaggle 2× T4 với ReDimNet-M (fp16, forward + backward):
+Tóm tắt recipe (chi tiết trong `configs/README.md`):
 
-| | mẫu/s |
-|---|---|
-| 1 GPU | 26,6 |
-| 2 GPU với `nn.DataParallel` | 18,8 (chậm hơn 1 GPU, RAM tăng 0,5–1,2 GB sau mỗi 15 bước) |
-| 2 GPU với `torchrun` (DDP) | khoảng gấp đôi 1 GPU (ước tính, chưa đo) |
+| | ReDimNet2-B4 | ReDimNet-M |
+|---|---|---|
+| loss | SphereFace2-C, s 32 | AAM, s 32 |
+| margin FT / LM | 0,2 / 0,3 | 0,2 / 0,5 |
+| crop FT / LM | 2,015 s / 6,015 s | 2,015 s / 6,015 s |
+| speed perturb FT / LM | 0.9, 1.1 / tắt | 0.9, 1.1 / tắt |
+| augment | `wespeaker_lite`, p 0,6 | `wespeaker`, p 0,6 |
+| SpecAugment | theo checkpoint (tắt) | theo checkpoint (bật) |
+| optimizer | SGD Nesterov 0,9, wd 1e-4 | như B4 |
+| LR | 1e-4 → 2,5e-5 (exponential, warm-up 1 epoch từ 0), × batch/64 | như B4 |
+| epoch | 5 mỗi stage | như B4 |
 
-Lý do: ReDimNet có rất nhiều lớp nhỏ, nên DataParallel tốn nhiều thời gian chép mô hình sang GPU thứ hai ở mỗi bước, và RAM cứ tăng dần cho tới khi tiến trình bị kill.
-
-Với `torchrun`:
+**Nhiều GPU: dùng `torchrun`.** Với `torchrun`:
 - `--batch_size` là batch tổng, chia đều cho các GPU.
+- `--accum_steps` cộng dồn gradient. LR nhân với `batch_size × accum_steps / 64`, đúng quy tắc `scale_ratio` của code chính thức.
 - `--n_cpu` là tổng số worker đọc dữ liệu, chia đều cho các tiến trình.
-- Khởi tạo lớp AAM và đánh giá val cũng được chia cho các GPU.
+- Khởi tạo head và đánh giá val được chia cho các GPU.
 - Chỉ tiến trình 0 in log và ghi file.
 
-### Công thức mặc định (`configs/ft_redimnet_m.yaml`)
+**Head cho speaker mới:** mỗi hàng là embedding trung bình của speaker đó, trích bằng encoder pretrained (`--head_init centroid`). Khi truyền `--initial_model .../last.ckpt`, các hàng của cùng speaker được chép từ checkpoint, như `reassemble_projection_head` của code chính thức.
 
-1. **Khởi tạo lớp AAM bằng centroid** (`--head_init centroid`): trọng số mỗi lớp là embedding trung bình của vài câu của speaker đó, trích bằng mô hình pretrained. Lớp speed-perturb dùng audio đã đổi tốc độ, nên ngay từ đầu các lớp đã phân biệt được với nhau.
-2. **Khởi động lớp AAM** (`--freeze_epochs 1`): chỉ train lớp AAM, encoder đứng yên.
-3. **Fine-tune toàn mạng.**
-   - AdamW: LR encoder `1e-4`, LR lớp AAM `1e-3`.
-   - LR warmup 1 epoch, sau đó giảm theo cosine.
-   - L2-SP `1e-4` kéo encoder về gần trọng số ban đầu, chống quên kiến thức pretrained.
-   - BatchNorm giữ running statistics pretrained (`--bn_mode frozen`); weight/bias của BN vẫn được học.
-   - Grad clip 5, AMP fp16.
-4. **Augment:**
-   - MUSAN và RIR như repo ECAPA.
-   - Speed perturb 0.9/1.1: mỗi tốc độ được coi là speaker mới, nên số lớp nhân 3.
-   - Kênh băng hẹp (`--narrowband_prob 0.2`): resample xuống 8 kHz rồi lên lại, hoặc lọc dải điện thoại 300–3400 Hz.
-   - SpecAugment trong front-end của mô hình.
-   - Mỗi batch chọn ngẫu nhiên đoạn dài 2 s hoặc 3 s (`--crop_sec 2,3`).
-5. **Đánh giá trên val mỗi epoch.**
-   - Epoch 0 là mô hình trước khi train, dùng làm mốc so sánh.
-   - In hai EER: `EER` (cosine) và `EER_center` (trừ embedding trung bình của 1000 file train trước khi tính cosine).
-   - `best.model` được chọn theo `--select_score`.
-
-Large-margin fine-tuning (LMF) sau đó:
-
-```bash
-python train.py --config configs/lmf_redimnet_m.yaml --initial_model <exp>/model/last.ckpt
-```
-
-`last.ckpt` có cả lớp AAM, nên LMF dùng tiếp được. Nếu truyền `best.model`, lớp AAM được khởi tạo lại bằng centroid.
-
-### Các nhóm tham số
-
-| Nhóm | Tham số |
-|---|---|
-| Dữ liệu | `--train_list --train_path --crop_sec --crop_probs --batch_size --n_cpu --seed` |
-| Augment | `--musan_path --rir_path --aug_probs --snr_* --num_* --speed_perturb --speed_probs --narrowband_prob --narrowband_types --specaug --specaug_freq --specaug_time` |
-| Mô hình / loss | `--pretrained --ckpt_dir --max_params --m --m_start --m_warmup_epochs --s --head_init --head_init_utts --head_init_sec` |
-| Tối ưu | `--max_epoch --optimizer --lr_backbone --lr_head --layer_decay --scheduler --lr_min_ratio --lr_decay --warmup_epochs --freeze_epochs --weight_decay --l2sp --accum_steps --bn_mode --grad_clip --amp` |
-| Đánh giá | `--eval_list --eval_path --eval_meta --test_step --eval_init --eval_mode --eval_sec --num_eval --eval_min_sec --eval_max_sec --eval_len_tol --eval_batch --eval_amp --cohort_size --select_score` |
-| Checkpoint | `--save_path --initial_model --resume --max_hours --keep_last --save_best --log_interval --device --data_parallel` |
+**Đánh giá trên val mỗi epoch.**
+- Epoch 0 là mô hình trước khi train, dùng làm mốc so sánh.
+- In `EER` (cosine) và `EER_center` (trừ trung bình embedding của 1000 file train, như `cal_mean` của WeSpeaker), kèm EER theo từng nhóm trial nếu có `--eval_meta`.
+- `best.model` được chọn theo `--select_score`.
 
 **Đầu ra** trong `--save_path`:
 
@@ -111,15 +91,14 @@ python train.py --config configs/lmf_redimnet_m.yaml --initial_model <exp>/model
 | `config.json` | toàn bộ tham số của lần chạy |
 | `speakers.txt` | speaker → chỉ số lớp |
 | `score.txt` | mỗi lần đánh giá một dòng |
-| `model/model_XXXX.model`, `model/best.model` | encoder theo định dạng tác giả, kèm `center_mean` |
-| `model/last.ckpt` | encoder, lớp AAM, optimizer, epoch: dùng để resume |
-| `model/anchor.pt` | trọng số tham chiếu của L2-SP |
+| `model/model_XXXX.model`, `model/best.model`, `model/last.model` | encoder theo định dạng tác giả, kèm `center_mean` |
+| `model/last.ckpt` | encoder, head, danh sách speaker, optimizer, epoch: dùng để resume và cho stage sau |
 
 **Resume:** chạy lại đúng lệnh cũ, code tự train tiếp từ `last.ckpt`. `--max_hours` dừng sạch trước giới hạn 12 giờ của Kaggle.
 
-**Bộ nhớ GPU:** ReDimNet tốn nhiều bộ nhớ khi train. Chạy `python probe_memory.py --crop_sec 3` để tìm batch lớn nhất vừa GPU và nhận gợi ý `--batch_size` / `--accum_steps`.
+**Bộ nhớ GPU:** `python probe_memory.py --pretrained redimnet2:b4-vox2-lm --loss sf2 --crop_sec 6.015` tìm batch lớn nhất vừa GPU và gợi ý `--batch_size` / `--accum_steps`.
 
-**Đánh giá trong lúc train là phép xấp xỉ nhanh.** Các file có độ dài lệch nhau ≤ 5% (`--eval_len_tol 0.05`) được gom chung batch và cắt về file ngắn nhất, kèm fp16. Kết quả gần như trùng bản chính xác (cosine ≥ 0.98 so với embedding chính xác). Số EER cuối cùng thì tính bằng `infer.py`, mặc định chính xác.
+**Đánh giá trong lúc train là phép xấp xỉ nhanh.** Các file có độ dài lệch nhau ≤ 2 % (`--eval_len_tol 0.02`) được gom chung batch và cắt về file ngắn nhất, kèm fp16. Số EER cuối cùng thì tính bằng `infer.py`, mặc định chính xác.
 
 ## Inference
 
@@ -148,21 +127,22 @@ Một số cờ hay dùng:
 |---|---|
 | `third_party/redimnet`, `third_party/redimnet2` | code mô hình gốc, không sửa (MIT) |
 | `models.py` | nạp checkpoint release hoặc file, đoán family, xuất theo định dạng tác giả |
-| `loss.py` | AAM-softmax: kích thước embedding tuỳ chỉnh, đổi được margin, khởi tạo bằng centroid |
-| `dataLoader.py` | crop theo batch, MUSAN/RIR (theo repo ECAPA), speed perturb, kênh băng hẹp |
-| `trainer.py` | vòng train/eval: freeze, lịch LR, L2-SP, AMP, DDP/DataParallel, checkpoint |
+| `loss.py` | AAM (WeSpeaker `ArcMarginProduct`) và SphereFace2 (code chính thức ReDimNet2), khởi tạo bằng centroid |
+| `dataLoader.py` | crop theo batch, speed perturb, các chuỗi augment chính thức (`wespeaker`, `wespeaker_lite`, `hard`) |
+| `trainer.py` | vòng train/eval: SGD + ExponentialDecrease + MarginScheduler như code chính thức, ghép head, AMP, DDP, checkpoint |
 | `dist_utils.py` | hàm phụ cho `torchrun` (khởi tạo, barrier, gom kết quả các GPU) |
 | `train.py`, `config.py` | train qua dòng lệnh hoặc YAML |
 | `infer.py`, `inference.py`, `tools.py` | chấm điểm, đánh giá, trích embedding, EER/minDCF |
 | `probe_memory.py` | tìm batch size vừa GPU |
-| `configs/` | `ft_redimnet_m.yaml`, `lmf_redimnet_m.yaml` |
-| `tests/` | dữ liệu giả và `smoke_test.sh` (CPU, vài phút) |
+| `configs/` | `redimnet_m/{ft,lm}.yaml`, `redimnet2_b4/{ft,lm}.yaml`, `README.md` (nguồn của từng giá trị) |
+| `backend.py` | back-end: nội suy trọng số, chuẩn hoá in-domain, AS-norm, QMF |
+| `tests/` | `test_official.py` (so với code chính thức), dữ liệu giả và `smoke_test.sh` (CPU, khoảng 10 phút) |
 
 ## Giấy phép và nguồn
 
 Repo theo giấy phép MIT. `third_party/` giữ nguyên giấy phép MIT của ID R&D, Inc. và Palabra.ai.
 
-Phần augment và cách dùng lấy theo [TaoRuijie/ECAPA-TDNN](https://github.com/TaoRuijie/ECAPA-TDNN) (qua [VietCH57/ECAPA-TDNN](https://github.com/VietCH57/ECAPA-TDNN)). Speed perturb và large-margin fine-tuning theo WeSpeaker và các bài báo ReDimNet.
+Loss, augment, lịch LR/margin chép theo code train chính thức của ReDimNet2 ([PalabraAI/redimnet2](https://github.com/PalabraAI/redimnet2) `applications/speaker_rec/wespeaker_lite`, Apache-2.0, fork của WeSpeaker) và WeSpeaker. Cách dùng dòng lệnh theo [VietCH57/ECAPA-TDNN](https://github.com/VietCH57/ECAPA-TDNN).
 
 ## Reference
 
@@ -190,6 +170,18 @@ Phần augment và cách dùng lấy theo [TaoRuijie/ECAPA-TDNN](https://github.
 @inproceedings{wang2023wespeaker,
   title     = {Wespeaker: A research and production oriented speaker embedding learning toolkit},
   author    = {Wang, Hongji and Liang, Chengdong and Wang, Shuai and Chen, Zhengyang and Zhang, Binbin and Xiang, Xu and Deng, Yanlei and Qian, Yanmin},
+  booktitle = {ICASSP 2023},
+  year      = {2023}
+}
+@inproceedings{qi2018lowshot,
+  title     = {Low-Shot Learning with Imprinted Weights},
+  author    = {Qi, Hang and Brown, Matthew and Lowe, David G.},
+  booktitle = {CVPR 2018},
+  year      = {2018}
+}
+@inproceedings{han2023sphereface2sv,
+  title     = {Exploring Binary Classification Loss for Speaker Verification},
+  author    = {Han, Bing and Chen, Zhengyang and Qian, Yanmin},
   booktitle = {ICASSP 2023},
   year      = {2023}
 }

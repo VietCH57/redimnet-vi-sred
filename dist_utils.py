@@ -1,7 +1,7 @@
 '''
 Small helpers for multi-GPU training with torchrun (DistributedDataParallel, one process per GPU).
 
-    torchrun --standalone --nproc_per_node 2 train.py --config configs/ft_redimnet_m.yaml
+    torchrun --standalone --nproc_per_node 2 train.py --config configs/redimnet2_b4/lm.yaml ...
 
 Without torchrun (WORLD_SIZE unset) everything degrades to a single process: rank 0, world size 1.
 '''

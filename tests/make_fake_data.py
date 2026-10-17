@@ -43,3 +43,23 @@ for room in ['smallroom/Room001','mediumroom/Room002']:
 write(f'{rr}/pointsource_noises/noise-free-sound-0001.wav', rng.standard_normal(16000).astype(np.float32)*0.1)
 write(f'{rr}/real_rirs_isotropic_noises/air_type1.wav', rng.standard_normal(8000).astype(np.float32)*0.1)
 print('train', len(train), 'val', len(val), 'val trials', len(tri), 'public trials', len(lines))
+# cleaned-label dataset layout (vi-sred-data-cleaning output): shared val + V0..V3 train lists
+lab = f'{K}/hongvitchugo/vi-sred-cleaned-labels/labels'
+os.makedirs(lab, exist_ok=True)
+open(f'{lab}/val_split.txt','w').write(''.join(f'{a} {b}\n' for a,b in val))
+open(f'{lab}/val_trials.txt','w').write(''.join(f'{l} {a} {b}\n' for l,a,b in tri))
+import csv
+with open(f'{lab}/val_trials_meta.csv','w', newline='') as f:
+    w = csv.writer(f); w.writerow(['label','type','enroll','test','same_gender','bw_diff','cross_channel','min_dur'])
+    for l,a,b in tri:
+        w.writerow([l, 'target' if l else random.choice(['nontarget_rand','nontarget_samegender']), a, b, True, 0.0,
+                    random.random() < 0.3, round(random.uniform(1, 5), 2)])
+variants = {'V0': train,
+            'V1': [t for k, t in enumerate(train) if k % 9 != 0],                                   # some files dropped
+            'V2': train,
+            'V3': [(('id00000' if s == 'id00003' else s + ('_s1' if (s == 'id00006' and int(r[-8:-4]) > 3) else '')), r)
+                   for s, r in train]}                                                           # merge + split
+for v, rows in variants.items():
+    os.makedirs(f'{lab}/{v}', exist_ok=True)
+    open(f'{lab}/{v}/train_split.txt','w').write(''.join(f'{a} {b}\n' for a,b in rows))
+print('labels:', lab)

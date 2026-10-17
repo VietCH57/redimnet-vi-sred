@@ -1,0 +1,64 @@
+# ReDimNet2-B4 (6.66M) - in-domain fine-tuning on Vi-SRED26 (optional stage before lm.yaml).
+# There is no official recipe for adapting a trained ReDimNet2 to a new speaker set. This stage is the
+# official LM recipe (configs/redimnet2_b4/lm.yaml = [R2-LM]) with the three settings that [R2-LM]
+# changes with respect to pre-training reverted to the pre-training values of
+#   PalabraAI/redimnet2 examples/vox2/recipes/redimnet2/b4/ptn.yaml  [R2-PTN]:
+#   crop 2.015 s, speed perturbation 0.9/1.1 (new classes), SF2 margin 0.2.
+# So: data / loss as in pre-training, optimiser as in the official stage that continues from a trained
+# checkpoint. Fine-tuning a source-domain model on target-domain data with speed-perturbed speaker
+# classes is also what DKU-MSXF did for the VoxSRC-23 domain-adaptation track (arXiv 2308.08766, Sec. 4).
+pretrained: redimnet2:b4-vox2-lm
+max_params: 7000000
+
+crop_sec: [2.015]          # [R2-PTN] num_frms 200
+min_dur: 1.0
+speed_perturb: [0.9, 1.1]  # [R2-PTN] speed_perturb true: speeds 1.0/0.9/1.1 uniform, x3 classes
+aug_chain: wespeaker_lite  # [R2-PTN] = [R2-LM]
+aug_prob: 0.6
+aug_preset: default
+gain_prob: 1.0
+gain_db: [-18.0, 6.0]
+specaug: checkpoint        # [R2-PTN] do_spec_aug false
+
+loss: sf2                  # [R2-PTN]
+sf2_margin_type: C
+sf2_lanbuda: 0.7
+sf2_t: 3
+s: 32.0
+m: 0.2                     # [R2-PTN] final_margin 0.2. The 0 -> 0.2 ramp of [R2-PTN] (epochs 20-40) is for
+m_start: 0.2               #   training from scratch; the checkpoint is past it -> constant 0.2.
+m_increase_start_epoch: 1
+m_fix_start_epoch: 1
+head_init: centroid        # DEVIATION (see lm.yaml)
+
+optimizer: sgd             # [R2-LM]
+momentum: 0.9
+nesterov: true
+weight_decay: 0.0001       # [R2-LM]
+head_wd_mult: 1.0          # [R2-LM]
+scheduler: exp             # [R2-LM]
+lr: 0.0001                 # [R2-LM]
+final_lr: 0.000025         # [R2-LM]
+lr_scale_ratio: -1         # [R2] world_size * batch_size / 64
+warmup_epochs: 1           # [R2-LM]
+warm_from_zero: true
+max_epoch: 5               # [R2-LM] num_epochs 5
+batch_size: 128            # 64 per GPU x 2, as lm.yaml
+accum_steps: 1
+amp: true
+grad_clip: 0
+freeze_epochs: 0
+l2sp: 0
+layer_decay: 1.0
+bn_mode: train
+
+eval_mode: full
+eval_len_tol: 0.02
+cohort_size: 1000
+select_score: center
+test_step: 1
+eval_init: true
+seed: 42
+n_cpu: 4
+keep_last: 2
+max_hours: 11.0

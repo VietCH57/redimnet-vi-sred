@@ -2,7 +2,7 @@
 Find the largest per-GPU training batch that fits in memory (forward + backward, AMP), so that
 --batch_size can be chosen before a long run.
 
-    python probe_memory.py --pretrained redimnet:M-vb2+vox2+cnc-ft_mix --crop_sec 3 --n_gpu 2
+    python probe_memory.py --pretrained redimnet2:b4-vox2-lm --loss sf2 --crop_sec 6.015 --n_gpu 2
 
 Prints the largest per-GPU batch that fits with a safety margin and a suggested
 --batch_size / --accum_steps pair for a target effective batch.
@@ -11,7 +11,7 @@ Prints the largest per-GPU batch that fits with a safety margin and a suggested
 import argparse, math, torch
 import torch.nn.functional as F
 import models
-from loss import AAMsoftmax
+from loss import AAMsoftmax, SphereFace2
 
 
 def fits(enc, head, b, n, amp):
@@ -35,17 +35,19 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--pretrained', default='redimnet:M-vb2+vox2+cnc-ft_mix')
     p.add_argument('--ckpt_dir', default='')
-    p.add_argument('--crop_sec', type=float, default=3.0, help='Longest training crop')
+    p.add_argument('--crop_sec', type=float, default=6.015, help='Longest training crop')
     p.add_argument('--amp', type=int, default=1)
-    p.add_argument('--n_gpu', type=int, default=0, help='GPUs used by --data_parallel (0 = all visible)')
+    p.add_argument('--n_gpu', type=int, default=0, help='Number of GPUs (0 = all visible)')
     p.add_argument('--target_batch', type=int, default=128, help='Desired effective batch')
+    p.add_argument('--loss', default='sf2', choices=['aam', 'sf2'])
+    p.add_argument('--n_class', type=int, default=5200, help='Head size (speakers x speeds)')
     p.add_argument('--margin', type=float, default=0.85, help='Use at most this fraction of GPU memory')
     p.add_argument('--candidates', type=str, default='96,80,64,56,48,40,32,24,16,12,8')
     a = p.parse_args()
     assert torch.cuda.is_available(), 'needs a GPU'
     enc, _ = models.load_encoder(a.pretrained, a.ckpt_dir)
     enc = enc.cuda().train()
-    head = AAMsoftmax(3000, enc.embed_dim).cuda()
+    head = (SphereFace2 if a.loss == 'sf2' else AAMsoftmax)(a.n_class, enc.embed_dim).cuda()
     total = torch.cuda.get_device_properties(0).total_memory / 2 ** 30
     n = int(a.crop_sec * 16000)
     best = None

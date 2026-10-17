@@ -1,0 +1,57 @@
+# ReDimNet-M (4.81M) - large-margin fine-tuning on Vi-SRED26.
+# ReDimNet was trained with the WeSpeaker pipeline (IDRnD/ReDimNet README) and this LM stage
+# (Yakovlev et al., Interspeech 2024 "Reshape Dimensions Network for Speaker Recognition", Sec. 3.2  [RD]):
+# "AAM-softmax margin was set to constant 0.5", "length of training utterances expanded to 6 seconds",
+# "Speed perturbations were turned off". The values [RD] does not give come from the WeSpeaker LM recipe
+#   wenet-e2e/wespeaker examples/voxceleb/v2/conf/resnet_lm.yaml  [WS-LM]
+# (the only LM config of examples/voxceleb/v2/run.sh, also used there for ReDimNet / conf/redimnet.yaml [WS-RD]).
+pretrained: redimnet:M-vb2+vox2+cnc-ft_mix
+max_params: 7000000
+
+crop_sec: [6.015]          # [RD] 6 s; [WS-LM] num_frms 600 -> 6.015 s
+min_dur: 1.0               # [WS-LM] filter_args.min_num_frames 100
+speed_perturb: []          # [RD] turned off ([WS-LM] keeps it in the yaml but train.py disables it when do_lm)
+aug_chain: wespeaker       # [WS-LM] aug_prob 0.6 with the upstream WeSpeaker add_reverb_noise
+aug_prob: 0.6
+specaug: checkpoint        # the checkpoint's model_config: do_spec_aug true, freq [0,10], time [0,20]
+
+loss: aam                  # [RD] AAM softmax; [WS-RD] project_type arc_margin, easy_margin false
+s: 32.0                    # [WS-RD] / [WS-LM] scale 32
+m: 0.5                     # [RD] constant 0.5; [WS-LM] initial_margin = final_margin = 0.5
+m_start: 0.5
+m_increase_start_epoch: 1
+m_fix_start_epoch: 1
+head_init: centroid        # DEVIATION: new speakers -> centroid rows (weight imprinting, Qi et al. CVPR 2018);
+                           # with --initial_model <FT last.ckpt> the FT rows are copied.
+
+optimizer: sgd             # [WS-LM] SGD momentum 0.9 nesterov
+momentum: 0.9
+nesterov: true
+weight_decay: 0.0001       # [WS-LM]
+head_wd_mult: 1.0          # WeSpeaker: one parameter group
+scheduler: exp             # [WS-LM] ExponentialDecrease
+lr: 0.0001                 # [WS-LM] initial_lr
+final_lr: 0.000025         # [WS-LM] final_lr
+lr_scale_ratio: -1         # WeSpeaker train.py: scale_ratio = world_size * batch_size / 64
+warmup_epochs: 1           # [WS-LM] warm_up_epoch 1, warm_from_zero true
+warm_from_zero: true
+max_epoch: 5               # [WS-LM] num_epochs 5
+batch_size: 128            # [WS-LM] batch_size 64 per GPU x 2 GPUs
+accum_steps: 1
+amp: true                  # DEVIATION: [WS-LM] enable_amp False; fp16 is needed for speed on T4 (head stays fp32)
+grad_clip: 0               # WeSpeaker executor: no clipping
+freeze_epochs: 0
+l2sp: 0
+layer_decay: 1.0
+bn_mode: train
+
+eval_mode: full            # [RD] cosine on full utterances
+eval_len_tol: 0.02
+cohort_size: 1000
+select_score: center       # WeSpeaker local/score.sh cal_mean True
+test_step: 1
+eval_init: true
+seed: 42                   # [WS-LM]
+n_cpu: 4
+keep_last: 2
+max_hours: 11.0
