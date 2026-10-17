@@ -156,6 +156,42 @@ def extract_embeddings(encoder, files, root, device='cuda', mode='full', eval_se
             for i, f in enumerate(files)}
 
 
+class _FixedSet(torch.utils.data.Dataset):
+    '''Vox1TestEvalDatasetSimple of the official ReDimNet2 training code: the first `dur` seconds of the
+    file (read_audio_section start_time=0), shorter files wrap-padded to `dur`. Every item has the same
+    length, so the network only ever sees one input shape (plus a smaller last batch).'''
+
+    def __init__(self, paths, n):
+        self.paths, self.n = paths, n
+
+    def __len__(self):
+        return len(self.paths)
+
+    def __getitem__(self, i):
+        x = load_wav(self.paths[i])[:self.n]
+        if x.shape[0] < self.n:
+            x = numpy.pad(x, (0, self.n - x.shape[0]), 'wrap')
+        return i, torch.from_numpy(x)
+
+
+@torch.no_grad()
+def extract_fixed(encoder, files, root, device='cuda', dur=8.0, batch=64, amp=False, workers=2):
+    '''{file: (emb [D], None)}: embedding of the first `dur` s of every file (official fast validation,
+    wespeaker_lite eval_epoch_simple with eval_dur 8.0). L2-normalised, float32 numpy.'''
+    device = torch.device(device)
+    encoder.eval()
+    paths = [os.path.join(root, f) for f in files]
+    dl = torch.utils.data.DataLoader(_FixedSet(paths, int(round(dur * SR))), batch_size=batch, shuffle=False,
+                                     num_workers=workers, pin_memory=False)
+    out = None
+    for idx, x in dl:
+        e = _forward(encoder, x, device, amp).cpu().numpy()
+        if out is None:
+            out = numpy.zeros((len(files), e.shape[1]), numpy.float32)
+        out[idx.numpy()] = e
+    return {f: (out[i], None) for i, f in enumerate(files)}
+
+
 def mean_embedding(emb):
     '''(mean of full, mean of crops) over all files of an embedding dict -> center for scoring.'''
     vals = list(emb.values())

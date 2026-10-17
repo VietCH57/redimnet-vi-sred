@@ -22,6 +22,9 @@ Examples
 '''
 
 import argparse, json, os, random, time, zipfile
+# cuDNN keeps an execution plan per input shape in host RAM (default up to 10000 plans, ~2 GiB per process,
+# PyTorch PR #104369). Evaluation sees thousands of utterance lengths, so the cache is kept smaller.
+os.environ.setdefault('TORCH_CUDNN_V8_API_LRU_CACHE_LIMIT', '2000')
 import numpy, torch
 import models
 from dataLoader import read_list

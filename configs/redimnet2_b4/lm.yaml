@@ -54,8 +54,9 @@ layer_decay: 1.0
 bn_mode: train
 
 # evaluation (not part of [R2]; held-out Vi-SRED speakers, see configs/README.md)
-eval_mode: full            # [R2 paper] cosine on full-length utterances
-eval_len_tol: 0.02
+eval_dur: 8.0              # [R2] eval_dur 8.0: first 8 s of every file, wrap-padded (Vox1TestEvalDatasetSimple), rank 0
+eval_amp: true             # [R2] eval under autocast(enable_amp); one input shape
+eval_batch: 16             # [R2] validation batch = batch_size // 4 (64 // 4)
 cohort_size: 1000
 select_score: center       # WeSpeaker local/score.sh: cosine after subtracting the training mean (cal_mean True)
 test_step: 1

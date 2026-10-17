@@ -56,6 +56,10 @@ Muốn chạy LM sau FT: `--initial_model <ft>/model/last.ckpt`. Khi đó các h
 | optimizer, wd, LR, warm-up, epoch, batch | như B4 | như B4 | [WS-LM]: SGD Nesterov 0,9, wd 1e-4, 1e-4 → 2,5e-5, warm-up 1 epoch từ 0, 5 epoch, batch 64/GPU; [WS] `train.py` có cùng `scale_ratio` |
 | AMP | bật | bật | **Lệch:** [WS-LM] `enable_amp: False`. Trên T4 cần fp16 để đủ nhanh; head vẫn chạy fp32 |
 
+## Đánh giá trong lúc train
+
+Giống [R2] (`bin/train.py` + `utils/executor.eval_epoch_simple`, `eval_dur: 8.0`): mỗi file val lấy **8 giây đầu**, file ngắn hơn được lặp cho đủ 8 s (`Vox1TestEvalDatasetSimple`), fp16, batch = batch train / 4 = 16, cosine. Mọi đầu vào cùng một độ dài. Khác [R2] ở một điểm: chỉ GPU 0 đánh giá (GPU 0 giữ mô hình được lưu), các GPU khác chờ. EER cuối cùng tính bằng `infer.py` trên cả câu, fp32.
+
 ## Những chỗ lệch so với nguồn (đã ghi `DEVIATION` trong YAML)
 
 1. **Khởi tạo head cho speaker mới.** [R2] chép hàng của speaker đã có trong checkpoint và gán hàng ngẫu nhiên cho speaker mới. Checkpoint release không kèm head, còn speaker Vi-SRED đều là speaker mới. Repo này đặt mỗi hàng bằng embedding trung bình của speaker đó, trích bằng encoder pretrained (*weight imprinting*, Qi, Brown & Lowe, CVPR 2018). Cách này tránh việc gradient từ một head ngẫu nhiên phá encoder ngay ở các bước đầu; hiện tượng đó được phân tích trong Kumar et al., *Fine-Tuning can Distort Pretrained Features*, ICLR 2022 (LP-FT). Muốn dùng đúng cách chính thức (xavier): `--head_init random`.

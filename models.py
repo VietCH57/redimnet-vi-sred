@@ -58,9 +58,18 @@ def resolve(spec, cache_dir=''):
     os.makedirs(cache_dir, exist_ok=True)
     dst = os.path.join(cache_dir, '%s__%s.pt' % (family, name))
     if not os.path.exists(dst):
-        print('Downloading', url)
-        torch.hub.download_url_to_file(url, dst + '.part', progress=False)
-        os.replace(dst + '.part', dst)
+        import time
+        for attempt in range(5):                       # GitHub releases sometimes answer 5xx: retry
+            try:
+                print('Downloading', url)
+                torch.hub.download_url_to_file(url, dst + '.part', progress=False)
+                os.replace(dst + '.part', dst)
+                break
+            except Exception as e:
+                if attempt == 4:
+                    raise
+                print('Download failed (%s), retrying in %d s' % (e, 10 * (attempt + 1)))
+                time.sleep(10 * (attempt + 1))
     return dst, family
 
 

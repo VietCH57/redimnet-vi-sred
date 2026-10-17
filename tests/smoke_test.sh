@@ -7,7 +7,7 @@ R=${1:-/tmp/redimnet_smoke}
 rm -rf "$R"; python tests/make_fake_data.py "$R"
 K=$R/kaggle/input/datasets; T=$K/hongvitchugo/vi-sred26-train; P=$K/hongvitchugo/vi-sred26-publictest
 L=$K/hongvitchugo/vi-sred-cleaned-labels/labels; D=$T/Vi-SRED26-Train/data
-SMALL="--device cpu --batch_size 4 --n_cpu 2 --cohort_size 20 --log_interval 100 --eval_len_tol 0 --max_hours 0
+SMALL="--device cpu --batch_size 4 --n_cpu 2 --cohort_size 20 --log_interval 100 --eval_dur 2 --eval_batch 4 --max_hours 0
        --musan_path $K/nhattruongdev/musan-noise --rir_path $K/nhattruongdev/rirs-noises
        --eval_list $L/val_trials.txt --eval_path $D --eval_meta $L/val_trials_meta.csv"
 for M in redimnet_m redimnet2_b4; do

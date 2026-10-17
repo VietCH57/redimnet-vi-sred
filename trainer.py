@@ -27,7 +27,7 @@ import models
 import dist_utils as du
 from loss import build_head
 from dataLoader import load_wav, SR
-from inference import parse_trials, extract_embeddings, score_trials, mean_embedding, subset_metrics
+from inference import parse_trials, extract_embeddings, extract_fixed, score_trials, mean_embedding, subset_metrics
 from tools import compute_metrics
 
 
@@ -350,64 +350,42 @@ class Trainer(nn.Module):
     # ------------------------------------------------------------------ evaluation
     @torch.no_grad()
     def eval_network(self, eval_list, eval_path, cohort=None, p_targets=(0.05,), eval_meta=''):
-        '''Returns {"EER": .., "minDCF..": .., ["EER_center": ..], [subset EERs]}; cohort = (files, root) for center scoring.'''
+        '''Validation during training, as the official code (wespeaker_lite bin/train.py + executor.eval_epoch_simple):
+        embeddings of the first --eval_dur seconds of every file (fixed length -> one input shape), cosine
+        scoring. Runs on rank 0 only (the model that is saved); the other ranks wait at the barrier in train.py.
+        --eval_dur 0 = whole utterances (the slower inference.extract_embeddings path).
+        Returns {"EER", "minDCF..", ["EER_center"], [subset EERs]} on rank 0, None elsewhere.'''
+        if not du.is_main():
+            return None
         a = self.args
         enroll, test, labels = parse_trials(eval_list)
         if labels[0] is None:
             raise ValueError('%s has no labels' % eval_list)
         files = sorted(set(enroll) | set(test))
-        kw = dict(device=self.device, mode=a.eval_mode, eval_sec=a.eval_sec, num_eval=a.num_eval,
-                  min_sec=a.eval_min_sec, max_sec=a.eval_max_sec, len_tol=a.eval_len_tol,
-                  max_batch=a.eval_batch, amp=a.eval_amp, workers=self.workers(), progress=False)
         if self.device.type == 'cuda':
             torch.cuda.empty_cache()
-        self.sync_buffers()
-        emb = self._embed(files, eval_path, kw)
-        cemb = self._embed(cohort[0], cohort[1], kw) if (cohort and cohort[0]) else None
-        if not du.is_main():
-            return None
-        scores = score_trials(emb, enroll, test, a.eval_mode)
+
+        def embed(fs, root):
+            if a.eval_dur > 0:
+                return extract_fixed(self.encoder, fs, root, device=self.device, dur=a.eval_dur, batch=a.eval_batch,
+                                     amp=a.eval_amp, workers=self.workers())
+            return extract_embeddings(self.encoder, fs, root, device=self.device, mode='full', min_sec=a.eval_min_sec,
+                                      max_sec=a.eval_max_sec, len_tol=a.eval_len_tol, max_batch=a.eval_batch,
+                                      amp=a.eval_amp, workers=self.workers(), progress=False)
+        emb = embed(files, eval_path)
+        cemb = embed(cohort[0], cohort[1]) if (cohort and cohort[0]) else None
+        scores = score_trials(emb, enroll, test, 'full')
         res = compute_metrics(scores, labels, p_targets)
         if eval_meta:
             res.update(subset_metrics(scores, labels, enroll, test, eval_meta, p_targets[0]))
         if cemb is not None:
             self.center = mean_embedding(cemb)
-            res['EER_center'] = compute_metrics(score_trials(emb, enroll, test, a.eval_mode, self.center), labels, [])['EER']
+            res['EER_center'] = compute_metrics(score_trials(emb, enroll, test, 'full', self.center), labels, [])['EER']
         return res
-
-    @torch.no_grad()
-    def sync_buffers(self):
-        '''DDP: copy rank 0's BatchNorm running statistics to every rank. During training DDP broadcasts them
-        at the start of each forward, after which every rank updates its own copy with its own batch, so
-        the ranks end an epoch with slightly different statistics. Evaluation is split over the ranks and
-        rank 0's model is the one saved, so every rank must embed with rank 0's statistics.'''
-        if not self.ddp:
-            return
-        import torch.distributed as dist
-        # only normalisation statistics change during training; the other buffers (e.g. the STFT / mel kernels
-        # of ReDimNet2's front-end, some of them non-contiguous, which NCCL refuses) are constants
-        for mod in self.encoder.modules():
-            if isinstance(mod, nn.modules.batchnorm._BatchNorm):
-                for b in mod.buffers(recurse=False):
-                    if b.is_contiguous():
-                        dist.broadcast(b, src=0)
-                    else:
-                        t = b.contiguous(); dist.broadcast(t, src=0); b.copy_(t)
 
     def workers(self):
         '''DataLoader workers of this process: --n_cpu is the total, shared by the DDP processes.'''
         return max(1, self.args.n_cpu // du.world())
-
-    def _embed(self, files, root, kw):
-        '''Embeddings of `files`; with DDP every rank embeds files[rank::world] and rank 0 receives all.'''
-        if not self.ddp:
-            return extract_embeddings(self.encoder, files, root, **kw)
-        mine = files[du.rank()::du.world()]
-        part = extract_embeddings(self.encoder, mine, root, **kw) if mine else {}
-        out = {}
-        for p in du.gather_objects(part):
-            out.update(p)
-        return out
 
     # ------------------------------------------------------------------ checkpoints
     def save_model(self, path, **meta):

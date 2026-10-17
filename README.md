@@ -98,7 +98,7 @@ Tóm tắt recipe (chi tiết trong `configs/README.md`):
 
 **Bộ nhớ GPU:** `python probe_memory.py --pretrained redimnet2:b4-vox2-lm --loss sf2 --crop_sec 6.015` tìm batch lớn nhất vừa GPU và gợi ý `--batch_size` / `--accum_steps`.
 
-**Đánh giá trong lúc train là phép xấp xỉ nhanh.** Các file có độ dài lệch nhau ≤ 2 % (`--eval_len_tol 0.02`) được gom chung batch và cắt về file ngắn nhất, kèm fp16. Số EER cuối cùng thì tính bằng `infer.py`, mặc định chính xác.
+**Đánh giá trong lúc train làm như code chính thức** (`wespeaker_lite`, `eval_dur: 8.0`): mỗi file lấy 8 giây đầu, file ngắn hơn được lặp cho đủ 8 giây, chạy trên GPU 0, batch 16, fp16. Mọi đầu vào cùng một kích thước, nên không bị tràn bộ nhớ vì có quá nhiều độ dài khác nhau. Đây là phép xấp xỉ để theo dõi và chọn epoch; số EER cuối cùng tính bằng `infer.py` trên cả câu, fp32.
 
 ## Inference
 
