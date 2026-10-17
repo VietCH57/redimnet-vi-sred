@@ -384,8 +384,15 @@ class Trainer(nn.Module):
         if not self.ddp:
             return
         import torch.distributed as dist
-        for b in self.encoder.buffers():
-            dist.broadcast(b, src=0)
+        # only normalisation statistics change during training; the other buffers (e.g. the STFT / mel kernels
+        # of ReDimNet2's front-end, some of them non-contiguous, which NCCL refuses) are constants
+        for mod in self.encoder.modules():
+            if isinstance(mod, nn.modules.batchnorm._BatchNorm):
+                for b in mod.buffers(recurse=False):
+                    if b.is_contiguous():
+                        dist.broadcast(b, src=0)
+                    else:
+                        t = b.contiguous(); dist.broadcast(t, src=0); b.copy_(t)
 
     def workers(self):
         '''DataLoader workers of this process: --n_cpu is the total, shared by the DDP processes.'''
