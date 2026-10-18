@@ -115,7 +115,9 @@ def cmd_embed(a):
     dur = np.array([soundfile.info(os.path.join(a.root, f)).duration for f in files], np.float32)
     bw = np.array([bandwidth(os.path.join(a.root, f)) for f in files], np.float32) if a.bandwidth else np.full(len(files), np.nan, np.float32)
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
-    np.savez(a.out, files=np.array(files), emb=E, dur=dur, bw=bw)
+    tmp = a.out + '.tmp.npz'            # written then renamed: an interrupted run never leaves a partial a.out
+    np.savez(tmp, files=np.array(files), emb=E, dur=dur, bw=bw)
+    os.replace(tmp, a.out)
     print('Saved %d embeddings to %s' % (len(files), a.out))
 
 
