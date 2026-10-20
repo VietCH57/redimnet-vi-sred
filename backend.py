@@ -35,6 +35,7 @@ on one fold is evaluated on the other (and vice versa). The final configuration 
 all validation trials.
 
 CLI
+  python backend.py soup   --models m1.model,m2.model[,...] --out soup.model
   python backend.py embed  --model A [--model_b B --alpha 0.5] --files list.txt --root DIR --out x.npz
   python backend.py select --variants a1=val.npz:train.npz[,a0.5=...] --train_list l.txt --trials val.txt --out sel.json
   python backend.py score  --sel sel.json --test_emb x.npz --train_emb t.npz --train_list l.txt
@@ -119,6 +120,35 @@ def cmd_embed(a):
     np.savez(tmp, files=np.array(files), emb=E, dur=dur, bw=bw)
     os.replace(tmp, a.out)
     print('Saved %d embeddings to %s' % (len(files), a.out))
+
+
+def cmd_soup(a):
+    """Uniform average of the encoder weights of fine-tuned models that share the same pre-trained
+    initialisation and architecture ("uniform soup", Wortsman et al., "Model soups: averaging weights of
+    multiple fine-tuned models improves accuracy without increasing inference time", ICML 2022).
+    Floating-point tensors (weights and BatchNorm running statistics) are averaged, integer buffers
+    (num_batches_tracked) are taken from the first model. The result is a regular encoder file
+    (model_config + state_dict + family), usable everywhere a best.model is."""
+    import models
+    paths = [p for p in a.models.split(',') if p]
+    assert len(paths) >= 1
+    states = [models.encoder_state_from_file(models.resolve(p)[0]) for p in paths]
+    fam0, cfg0, sd0 = states[0]
+    for p, (fam, cfg, sd) in zip(paths[1:], states[1:]):
+        assert fam == fam0, '%s: family %s != %s' % (p, fam, fam0)
+        assert sd.keys() == sd0.keys(), '%s: different architecture' % p
+        assert all(sd[k].shape == sd0[k].shape for k in sd0), '%s: different tensor shapes' % p
+    avg = {}
+    for k, v in sd0.items():
+        if v.is_floating_point():
+            avg[k] = (sum(st[2][k].double() for st in states) / len(states)).to(v.dtype)
+        else:
+            avg[k] = v.clone()
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+    torch.save({'model_config': cfg0, 'state_dict': avg, 'family': fam0,
+                'meta': {'soup': 'uniform', 'ingredients': paths}}, a.out + '.tmp')
+    os.replace(a.out + '.tmp', a.out)
+    print('Soup of %d models -> %s' % (len(paths), a.out))
 
 
 def load_npz(path):
@@ -411,8 +441,11 @@ def main():
     c.add_argument('--train_emb', required=True); c.add_argument('--train_list', required=True)
     c.add_argument('--val_emb', default=''); c.add_argument('--val_trials', default='')
     c.add_argument('--out', required=True); c.add_argument('--zip', action='store_true'); c.add_argument('--report', type=int, default=1)
+    u = sub.add_parser('soup')
+    u.add_argument('--models', required=True, help='comma-separated encoder files (best.model, ...)')
+    u.add_argument('--out', required=True)
     a = p.parse_args()
-    {'embed': cmd_embed, 'select': cmd_select, 'score': cmd_score}[a.cmd](a)
+    {'embed': cmd_embed, 'select': cmd_select, 'score': cmd_score, 'soup': cmd_soup}[a.cmd](a)
 
 
 if __name__ == '__main__':
