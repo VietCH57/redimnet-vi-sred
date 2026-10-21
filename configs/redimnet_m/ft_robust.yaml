@@ -1,0 +1,71 @@
+# ReDimNet-M - ROBUST in-domain fine-tuning on Vi-SRED26 (variant B): configs/redimnet_m/ft.yaml with
+#   (1) harder data: random training-crop length (short utterances) and narrow-band simulation, and
+#   (2) L2-SP towards the pretrained release (Li, Grandvalet & Davoine, "Explicit inductive bias for transfer
+#       learning with convolutional networks", ICML 2018, arXiv 1802.01483).
+# Motivation (validation only): EER on validation trials whose shorter side is < 2 s, or whose sides are
+# narrow-band / of different bandwidth, is 4-5x the EER of long wide-band trials (backend conditions report).
+# Every value that differs from ft.yaml is marked DEVIATION. Everything else is ft.yaml (see its sources).
+pretrained: redimnet:M-vb2+vox2+cnc-ft_mix
+max_params: 7000000
+
+crop_sec: [1.015, 2.015, 3.015]   # DEVIATION: one length per batch, uniform. ft.yaml: 2.015 ([WS-RD] 200 frames).
+                           #   1.015 s = 100 frames = the official minimum utterance length (min_num_frames 100);
+                           #   the mean stays 2.015 s
+min_dur: 1.0
+speed_perturb: [0.9, 1.1]  # [RD] / [WS-RD]: x3 classes
+aug_chain: hard            # DEVIATION: [R2-HA] augmentation tree (MUSAN music/noise/babble -> RIR -> low-pass);
+                           #   ReDimNet-M's own recipe uses the plain WeSpeaker chain
+aug_prob: 0.6              # (not used by the hard chain)
+hard_prob: 0.9             # [R2-HA] ptn: probability of the whole tree
+lowpass_prob: 0.5          # DEVIATION: [R2-HA] 0.25. Raised because ~23 % of the training files have <= 4 kHz
+                           #   effective bandwidth (EDA) and narrow-band / cross-band validation trials are the hardest
+lowpass_cutoffs: [0.5, 0.6]  # [R2-HA] uses 0.6 (4.8 kHz); 0.5 (4 kHz, telephone band) is in the [R2-HA] comments
+lowpass_width: 0.08        # [R2-HA] LowPassAug width
+hard_noise_prob: 0.8       # [R2-HA] OneOf(music, noise, babble) p 0.8
+hard_reverb_prob: 0.2      # [R2-HA] Reverb p 0.2
+l2sp_anchor: redimnet:M-vb2+vox2+cnc-ft_mix   # L2-SP anchor = the pretrained release (Li et al.: w0 = pre-trained weights)
+specaug: checkpoint        # [WS-RD] spec_aug False for training from scratch; the M checkpoint's own
+                           #   model_config has do_spec_aug true -> keep what the checkpoint was trained with
+
+loss: aam                  # [RD] / [WS-RD] arc_margin
+s: 32.0
+m: 0.2                     # [RD] / [WS-RD] final margin 0.2 (the 0 -> 0.2 ramp is for training from scratch)
+m_start: 0.2
+m_increase_start_epoch: 1
+m_fix_start_epoch: 1
+head_init: centroid        # DEVIATION (see lm.yaml)
+
+optimizer: sgd             # [WS-LM]
+momentum: 0.9
+nesterov: true
+weight_decay: 0.0001       # [WS-LM]
+head_wd_mult: 1.0
+scheduler: exp             # [WS-LM]
+lr: 0.0001                 # [WS-LM]
+final_lr: 0.000025         # [WS-LM]
+lr_scale_ratio: -1
+warmup_epochs: 1           # [WS-LM]
+warm_from_zero: true
+max_epoch: 5               # [WS-LM]
+batch_size: 128            # 64 per GPU x 2
+accum_steps: 1
+amp: true                  # DEVIATION (see lm.yaml)
+grad_clip: 0
+freeze_epochs: 0
+l2sp: 0.01                 # DEVIATION: L2-SP weight alpha. Li et al. choose alpha by cross-validation in
+                           #   {1e-3, 1e-2, 1e-1, 1} (Fig. 1); not tuned here: middle of that grid. With L2-SP the
+                           #   encoder gets no weight decay (the penalty replaces it, as in the paper)
+layer_decay: 1.0
+bn_mode: train
+
+eval_dur: 8.0              # [R2] eval_dur 8.0: first 8 s of every file, wrap-padded (Vox1TestEvalDatasetSimple), rank 0
+eval_amp: true             # [R2] eval under autocast(enable_amp); one input shape
+eval_batch: 16             # [R2] validation batch = batch_size // 4 (64 // 4)
+cohort_size: 1000
+select_score: center
+test_step: 1
+eval_init: true
+seed: 42
+n_cpu: 4
+keep_last: 2
+max_hours: 11.0

@@ -145,7 +145,7 @@ class Trainer(nn.Module):
         groups = {}
         for name, p in self.encoder.named_parameters():
             d = depth_of.get(id(p), top)          # front-end / pool / bn / linear = top
-            no_wd = a.wd_skip_1d and p.ndim <= 1
+            no_wd = (a.wd_skip_1d and p.ndim <= 1) or a.l2sp > 0     # L2-SP replaces weight decay on the encoder (Li et al.)
             key = ('enc', d, no_wd)
             if key not in groups:
                 groups[key] = {'params': [], 'lr_mult': a.layer_decay ** (top - d),
@@ -179,6 +179,15 @@ class Trainer(nn.Module):
             return
         if state is not None:
             sd = state
+        elif getattr(self.args, 'l2sp_anchor', ''):     # a given encoder (e.g. the pretrained release), same on every rank
+            import models
+            _, _, net_sd = models.encoder_state_from_file(models.resolve(self.args.l2sp_anchor)[0])
+            sd = {k: net_sd[k[len('net.'):]].detach().clone().float() for k, _ in self.encoder.named_parameters()}
+            if du.is_main():
+                torch.save(sd, path)
+                dist = sum(((p.detach().float().cpu() - sd[k]) ** 2).sum().item() for k, p in self.encoder.named_parameters())
+                print('L2-SP anchor: %s (||w_start - w_anchor||^2 = %.4g), weight %.3g, no weight decay on the encoder'
+                      % (self.args.l2sp_anchor, dist, self.args.l2sp))
         elif du.is_main() and os.path.exists(path):
             sd = torch.load(path, map_location=self.device)
         else:   # start of the run: identical weights on every rank

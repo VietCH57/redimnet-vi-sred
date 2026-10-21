@@ -116,7 +116,11 @@ def build_parser():
     g.add_argument('--lr_head_mult', type=float, default=1.0, help='Head LR = encoder LR * this (official: 1)')
     g.add_argument('--layer_decay', type=float, default=1.0, help='LR of encoder block k = lr * layer_decay^(depth-k) (1 = official)')
     g.add_argument('--freeze_epochs', type=int, default=0, help='Epochs training only the head (0 = official)')
-    g.add_argument('--l2sp', type=float, default=0.0, help='L2-SP penalty l2sp/2 * ||w - w_start||^2 on the encoder (0 = official)')
+    g.add_argument('--l2sp', type=float, default=0.0, help='L2-SP (Li et al., ICML 2018): penalty l2sp/2 * ||w - w_anchor||^2 on the encoder, '
+                   'which then gets no weight decay (as in the paper, the penalty replaces it for the pre-trained layers; '
+                   'the head keeps its weight decay). 0 = official')
+    g.add_argument('--l2sp_anchor', type=str, default='', help='[l2sp] encoder whose weights are the anchor (e.g. the pretrained release '
+                   '"redimnet:M-vb2+vox2+cnc-ft_mix"); empty = the weights at the start of this run')
     g.add_argument('--bn_mode', type=str, default='train', choices=['train', 'frozen'], help='train = official; frozen = keep pretrained BN running statistics')
     g.add_argument('--grad_clip', type=float, default=0.0, help='Clip grad-norm (0 = off, official)')
     g.add_argument('--amp', type=_str2bool, default=True, help='Mixed precision (fp16) for the encoder; the head always runs in fp32 (official enable_amp: true)')

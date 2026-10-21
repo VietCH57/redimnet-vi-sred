@@ -67,6 +67,19 @@ Giống [R2] (`bin/train.py` + `utils/executor.eval_epoch_simple`, `eval_dur: 8.
 3. **Chọn checkpoint.** WeSpeaker lấy model cuối của stage LM (`num_avg 1`). Repo này đánh giá trên val sau mỗi epoch và lưu `best.model`, kèm `last.model`. Val gồm các người tách riêng khỏi train (repo `vi-sred-data-cleaning`), nên việc chọn này không dùng tới public test.
 4. **Chấm điểm `center`.** WeSpeaker `local/score.sh` dùng `--cal_mean True`: trừ trung bình embedding (thô) của **toàn bộ** tập train rồi tính cosine. Repo này trừ trung bình embedding đã chuẩn hoá L2 của 1000 file train ngẫu nhiên khi đánh giá trong lúc train (cho nhanh). `infer.py --cohort_size` tăng được tới toàn bộ tập.
 
+## ReDimNet-M bền hơn với câu ngắn và băng hẹp (`ft_robust.yaml`, `lm_robust.yaml`)
+
+Biến thể của `ft.yaml` / `lm.yaml` cho ReDimNet-M. Lý do (chỉ từ val): EER của các trial val có câu ngắn hơn 2 s, hoặc có phía băng hẹp / lệch băng thông, cao gấp 4–5 lần trial dài, băng rộng. Mọi giá trị khác `ft.yaml` / `lm.yaml` đều ghi `DEVIATION` trong YAML.
+
+| Thay đổi | `ft_robust.yaml` | `lm_robust.yaml` | Nguồn / lý do |
+|---|---|---|---|
+| độ dài đoạn train (một độ dài mỗi batch, đều) | {1,015; 2,015; 3,015} s | {2,015; 6,015} s | **tự đặt**. 1,015 s = 100 frame = độ dài tối thiểu chính thức (`min_num_frames 100`); trung bình FT vẫn 2,015 s như [WS-RD] |
+| augment | cây `hard` của [R2-HA], p 0,9 | như FT, p 0,7 | [R2-HA] `ptn` 0,9 / `lm` 0,7; ReDimNet-M gốc dùng augment WeSpeaker thường |
+| low-pass | p 0,5, cutoff {0,5; 0,6}·Nyquist (4 / 4,8 kHz) | như FT | [R2-HA] p 0,25, cutoff 0,6 (0,5 nằm trong comment của [R2-HA]); **p 0,5 là tự đặt** theo EDA (~23 % file train ≤ 4 kHz) |
+| L2-SP | α = 0,01, anchor = checkpoint pretrained, encoder không weight decay | như FT (anchor vẫn là pretrained, không phải kết quả FT) | Li, Grandvalet & Davoine, ICML 2018 (arXiv 1802.01483): Ω = α/2·‖w − w⁰‖² thay cho weight decay trên các lớp pretrained; head giữ weight decay. Bài chọn α bằng cross-validation trong {10⁻³, 10⁻², 10⁻¹, 1}; **ở đây không tune, lấy giữa lưới** |
+
+`--l2sp_anchor <spec>` nạp anchor từ một encoder bất kỳ (mặc định: trọng số lúc bắt đầu run). Khi `--l2sp > 0`, encoder không có weight decay.
+
 ## Các tuỳ chọn không thuộc recipe chính thức (mặc định tắt)
 
 `--freeze_epochs`, `--l2sp` (Li et al., ICML 2018), `--layer_decay`, `--bn_mode frozen`, `--grad_clip`, `--wd_skip_1d`, `--optimizer adamw`. Chúng được giữ lại để làm ablation, nhưng không có trong bất kỳ YAML nào.
